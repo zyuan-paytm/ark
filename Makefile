@@ -195,11 +195,11 @@ test-e2e-temporal: ## Run Temporal e2e tests (T1-T5) against full docker stack
 	@echo "\033[1mRunning Temporal e2e (T1-T5)...\033[0m"
 	$(BUN) test e2e/temporal-control-plane.test.ts
 
-test-e2e-temporal-up: ## Bring up full e2e stack including Temporal services
-	$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e up -d --wait
+test-e2e-temporal-up: ## Bring up full e2e stack including Temporal services (2 worker replicas)
+	docker-compose -f .infra/docker-compose.e2e.yaml -p ark-e2e up -d --scale temporal-worker=2
 
 test-e2e-temporal-down: ## Tear down the full e2e stack and volumes
-	$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e down -v
+	docker-compose -f .infra/docker-compose.e2e.yaml -p ark-e2e down -v
 
 docker-build-temporal-worker: ## Build the Temporal worker Docker image for e2e
 	docker build -t ark-temporal-worker:e2e -f .infra/Dockerfile.temporal-worker .

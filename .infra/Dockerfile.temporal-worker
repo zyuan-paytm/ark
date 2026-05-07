@@ -1,6 +1,8 @@
 FROM oven/bun:1.2.10-slim
 WORKDIR /app
 COPY package.json bun.lock* ./
-RUN bun install --frozen-lockfile
+# --ignore-scripts skips better-sqlite3 native compilation; the worker
+# runs in Postgres mode (DATABASE_URL set) and never touches bun:sqlite.
+RUN bun install --frozen-lockfile --ignore-scripts
 COPY . .
 CMD ["bun", "run", "packages/core/temporal/worker.ts"]

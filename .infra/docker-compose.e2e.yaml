@@ -115,15 +115,12 @@ services:
       context: ..
       dockerfile: .infra/Dockerfile.temporal-worker
     image: ark-temporal-worker:e2e
-    container_name: ark-e2e-temporal-worker
     restart: on-failure
     depends_on:
       temporal:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    deploy:
-      replicas: 2
     environment:
       DATABASE_URL: postgres://ark:ark@postgres:5432/ark?sslmode=disable
       ARK_TEMPORAL_SERVER_URL: temporal:7233
