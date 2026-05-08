@@ -9,12 +9,13 @@ import { createPrAction } from "./create-pr.js";
 import { mergePrAction } from "./merge-pr.js";
 import { autoMergeAction } from "./auto-merge.js";
 import { closeAction } from "./close.js";
+import { flakyPrAction } from "./flaky-pr.js";
 import type { AppContext } from "../../app.js";
 import { withIdempotency } from "../idempotency.js";
 
 export type { ActionHandler, ActionOpts, ActionResult } from "./types.js";
 
-const ACTIONS: readonly ActionHandler[] = [createPrAction, mergePrAction, autoMergeAction, closeAction];
+const ACTIONS: readonly ActionHandler[] = [createPrAction, mergePrAction, autoMergeAction, closeAction, flakyPrAction];
 
 const ACTION_INDEX: Map<string, ActionHandler> = (() => {
   const m = new Map<string, ActionHandler>();
