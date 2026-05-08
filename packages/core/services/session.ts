@@ -118,10 +118,11 @@ export class SessionService {
         workflow_run_id: handle.firstExecutionRunId,
       } as Partial<Session>);
     }
-    // Kick the bespoke dispatch engine so stages run -- in Temporal mode the
-    // workflow watches completion in the background while bespoke handles
-    // stage dispatch. Phase 3 will drive dispatch from the workflow itself.
-    this.emitSessionCreated(session.id);
+    // Phase 3 cutover: bespoke dispatch only fires when Temporal is OFF.
+    // In Temporal mode the workflow drives every stage via dispatchStageActivity.
+    if (!usesTemporal) {
+      this.emitSessionCreated(session.id);
+    }
     return (await this.sessions.get(session.id))!;
   }
 

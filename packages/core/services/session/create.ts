@@ -244,7 +244,9 @@ export class SessionCreator {
       } as Partial<Session>);
     }
 
-    hooks?.onCreated?.(session.id);
+    // Phase 3 cutover: bespoke dispatch only fires when Temporal is OFF.
+    // In Temporal mode the workflow drives every stage via dispatchStageActivity.
+    if (!usesTemporal) hooks?.onCreated?.(session.id);
 
     return (await d.sessions.get(session.id))!;
   }
