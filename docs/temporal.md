@@ -1,8 +1,10 @@
 # Temporal Orchestration for Ark (Design / Phase 0)
 
-> Status: **design-only**. Nothing in this document is implemented. Phase 0 delivers only the design + a Bun-compat spike + a local Temporal cluster. Phases 1--6 are tracked as GitHub issues (see "Migration sequence" at the bottom).
+> **2026-05-07 update (Phase 2 landed):** Local mode is deprecated and is no longer a parity target. The capability-seam approach (LocalOrchestrator vs TemporalOrchestrator) has been simplified to a flag check at `SessionService` boundaries. RF-2 and RF-4 from orchestrator-refactor-plan are deferred. The Temporal worker requires Bun 1.3+ for workflow task execution (see `packages/core/temporal/worker.ts`).
+
+> Status: **Phase 2 shipped.** `features.temporalOrchestration=true` routes new hosted sessions through the `sessionWorkflow`. The bespoke engine is untouched and remains the default (`features.temporalOrchestration=false`). Phases 3-6 are tracked as GitHub issues.
 >
-> **Scope: hosted (control-plane) mode only.** Local mode keeps its bespoke state machine permanently — the simpler abstraction is correct for laptops. Temporal is the scale-out story for the multi-tenant hosted deployment. Mode is discriminated through the existing `AppMode` capability pattern; callers read `app.mode.orchestrator.*` and never branch on whether Temporal is behind it.
+> **Scope: hosted (control-plane) mode only.** Local mode is deprecated.
 >
 > Authoritative source of the existing orchestrator (stays put in local mode): `packages/core/state/flow.ts` + `packages/core/services/*-orchestration.ts` (decomposed set: `session-lifecycle.ts`, `stage-orchestrator.ts`, `task-builder.ts`, `workspace-service.ts`, `agent-launcher.ts`, `session-output.ts`).
 
