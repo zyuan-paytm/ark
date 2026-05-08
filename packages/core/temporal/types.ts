@@ -3,6 +3,7 @@ export interface SessionWorkflowInput {
   tenantId: string;
   flowName: string;
   inputs?: { files?: Record<string, string>; params?: Record<string, string> };
+  shadowMode?: boolean;
 }
 
 export interface StageWorkflowInput {
@@ -35,4 +36,5 @@ export interface ProjectionInput {
   stageIdx?: number;
   seq: number;
   patch: Record<string, unknown>;
+  mode?: "real" | "shadow";
 }

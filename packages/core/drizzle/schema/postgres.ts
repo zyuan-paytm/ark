@@ -586,4 +586,5 @@ export const sessionProjectionsShadow = pgTable("session_projections_shadow", {
   sessionId: text("session_id").notNull(),
   stageIdx: integer("stage_idx"),
   lastSeq: bigint("last_seq", { mode: "number" }).notNull(),
+  patchJson: text("patch_json"),
 });

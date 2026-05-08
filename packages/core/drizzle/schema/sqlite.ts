@@ -576,4 +576,5 @@ export const sessionProjectionsShadow = sqliteTable("session_projections_shadow"
   sessionId: text("session_id").notNull(),
   stageIdx: integer("stage_idx"),
   lastSeq: integer("last_seq").notNull(),
+  patchJson: text("patch_json"),
 });

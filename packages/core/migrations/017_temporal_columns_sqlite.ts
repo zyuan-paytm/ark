@@ -40,7 +40,8 @@ export async function applySqliteTemporalColumns(db: DatabaseAdapter): Promise<v
   await db.exec(`CREATE TABLE IF NOT EXISTS session_projections_shadow (
     session_id TEXT NOT NULL,
     stage_idx  INTEGER,
-    last_seq   INTEGER NOT NULL
+    last_seq   INTEGER NOT NULL,
+    patch_json TEXT
   )`);
   await db.exec(
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_projections_shadow_pk ON session_projections_shadow(session_id, COALESCE(stage_idx, -1))",

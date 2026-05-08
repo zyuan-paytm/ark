@@ -15,17 +15,21 @@ export async function diffProjections(db: DatabaseAdapter, sessionId: string): P
   const real = (await db.prepare("SELECT * FROM sessions WHERE id=?").get(sessionId)) as
     | Record<string, unknown>
     | undefined;
-  const shadow = (await db
+  const shadowRow = (await db
     .prepare("SELECT * FROM session_projections_shadow WHERE session_id=? AND stage_idx IS NULL")
     .get(sessionId)) as Record<string, unknown> | undefined;
 
-  if (!real || !shadow) return [];
+  if (!real || !shadowRow) return [];
+
+  // patch_json stores the accumulated projection patch written by shadow-mode activities.
+  const shadowPatch: Record<string, unknown> =
+    shadowRow.patch_json ? JSON.parse(shadowRow.patch_json as string) : {};
 
   const COMPARE_FIELDS = ["status", "stage", "error", "pr_url"] as const;
   const diffs: ProjectionDiff[] = [];
   for (const field of COMPARE_FIELDS) {
-    if (real[field] !== (shadow as any)[field]) {
-      diffs.push({ sessionId, field, realValue: real[field], shadowValue: (shadow as any)[field] });
+    if (real[field] !== shadowPatch[field]) {
+      diffs.push({ sessionId, field, realValue: real[field], shadowValue: shadowPatch[field] });
     }
   }
   return diffs;

@@ -25,7 +25,8 @@ const STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS session_projections_shadow (
     session_id TEXT NOT NULL,
     stage_idx  INTEGER,
-    last_seq   BIGINT NOT NULL
+    last_seq   BIGINT NOT NULL,
+    patch_json TEXT
   )`,
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_projections_shadow_pk ON session_projections_shadow(session_id, COALESCE(stage_idx, -1))",
 ];

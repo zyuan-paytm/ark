@@ -44,8 +44,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
   const seq = () => workflowInfo().historyLength;
 
+  const mode = input.shadowMode ? ("shadow" as const) : ("real" as const);
+
   await startSessionActivity(input);
-  await projectSessionActivity({ sessionId: input.sessionId, seq: seq(), patch: { status: "ready" } });
+  await projectSessionActivity({ sessionId: input.sessionId, seq: seq(), patch: { status: "ready" }, mode });
 
   const flow = await loadFlowActivity({ flowName: input.flowName });
 
@@ -60,6 +62,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         stageIdx,
         seq: seq(),
         patch: { status: "awaiting_review" },
+        mode,
       });
       await condition(() => approved || rejected !== null);
       if (rejected !== null) {
@@ -68,11 +71,13 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           stageIdx,
           seq: seq(),
           patch: { status: "rejected", error: rejected },
+          mode,
         });
         await projectSessionActivity({
           sessionId: input.sessionId,
           seq: seq(),
           patch: { status: "failed", error: rejected },
+          mode,
         });
         return;
       }
@@ -82,6 +87,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         stageIdx,
         seq: seq(),
         patch: { status: "completed" },
+        mode,
       });
       continue;
     }
@@ -94,6 +100,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         stageIdx,
         seq: seq(),
         patch: { status: "fanning_out" },
+        mode,
       });
       const childPromises = subtasks.map((sub: any, j: number) =>
         startChild(stageWorkflow, {
@@ -119,12 +126,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         stageIdx,
         seq: seq(),
         patch: { status: failed ? "failed" : "completed" },
+        mode,
       });
       if (failed) {
         await projectSessionActivity({
           sessionId: input.sessionId,
           seq: seq(),
           patch: { status: "failed" },
+          mode,
         });
         return;
       }
@@ -139,6 +148,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       stageIdx,
       seq: seq(),
       patch: { status: "dispatching" },
+      mode,
     });
 
     const launch = await dispatchStageActivity({ sessionId: input.sessionId, stageIdx });
@@ -147,6 +157,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       stageIdx,
       seq: seq(),
       patch: { status: "running", ...launch },
+      mode,
     });
 
     const result = await awaitStageCompletionActivity({
@@ -159,6 +170,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       stageIdx,
       seq: seq(),
       patch: { status: result.status },
+      mode,
     });
 
     if (result.status !== "completed") {
@@ -166,6 +178,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         sessionId: input.sessionId,
         seq: seq(),
         patch: { status: result.status },
+        mode,
       });
       return;
     }
@@ -175,5 +188,6 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     sessionId: input.sessionId,
     seq: seq(),
     patch: { status: "completed" },
+    mode,
   });
 }
