@@ -30,6 +30,13 @@ export class SessionService {
    */
   private readonly dispatchListeners: SessionDispatchListeners;
 
+  /**
+   * Factory for the Temporal client. Overridable in tests (assign a stub
+   * function to `(service as any)._temporalClientFactory`) without needing
+   * to monkey-patch ES module live bindings.
+   */
+  _temporalClientFactory: ((cfg: any) => Promise<any>) | null = null;
+
   constructor(
     private sessions: SessionRepository,
     private events: EventRepository,
@@ -698,8 +705,25 @@ export class SessionService {
 
   /**
    * Approve a review gate and force-advance past it.
+   *
+   * When the session uses Temporal orchestration, sends an `approveReviewGate`
+   * signal to the running workflow instead of calling the legacy helper.
    */
   async approveReviewGate(id: string): Promise<SessionOpResult> {
+    const session = await this.sessions.get(id);
+    if (!session) return { ok: false, message: `Session ${id} not found` };
+
+    if (session.orchestrator === "temporal") {
+      if (!session.workflow_id) {
+        return { ok: false, message: `Session ${id} has no workflow_id -- cannot send Temporal signal` };
+      }
+      const factory = this._temporalClientFactory ?? (await import("../temporal/client.js")).getTemporalClient;
+      const client = await factory(this.app.config.temporal);
+      const handle = client.workflow.getHandle(session.workflow_id);
+      await handle.signal("approveReviewGate", { sessionId: id });
+      return { ok: true, message: "OK", sessionId: id };
+    }
+
     const { approveReviewGate: legacyApprove } = await import("./review-gate.js");
     return legacyApprove(this.app, id);
   }
@@ -709,8 +733,25 @@ export class SessionService {
    * (with `{{rejection_reason}}` substituted) and appends it to the next
    * dispatch of the current stage. When `on_reject.max_rejections` is
    * exceeded, the session is marked failed instead.
+   *
+   * When the session uses Temporal orchestration, sends a `rejectReviewGate`
+   * signal to the running workflow instead of calling the legacy helper.
    */
   async rejectReviewGate(id: string, reason: string): Promise<SessionOpResult> {
+    const session = await this.sessions.get(id);
+    if (!session) return { ok: false, message: `Session ${id} not found` };
+
+    if (session.orchestrator === "temporal") {
+      if (!session.workflow_id) {
+        return { ok: false, message: `Session ${id} has no workflow_id -- cannot send Temporal signal` };
+      }
+      const factory = this._temporalClientFactory ?? (await import("../temporal/client.js")).getTemporalClient;
+      const client = await factory(this.app.config.temporal);
+      const handle = client.workflow.getHandle(session.workflow_id);
+      await handle.signal("rejectReviewGate", { sessionId: id, reason: reason ?? "" });
+      return { ok: true, message: "OK", sessionId: id };
+    }
+
     const { rejectReviewGate: legacyReject } = await import("./review-gate.js");
     const r = await legacyReject(this.app, id, reason ?? "");
     // review-gate returns { ok, message } without sessionId; widen to SessionOpResult.

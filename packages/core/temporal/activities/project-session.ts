@@ -23,7 +23,33 @@ function deps(): OrchestrationDeps {
 export async function projectSessionActivity(input: ProjectionInput): Promise<void> {
   const d = deps();
   const db = (d.sessions as any).db;
+  const isShadow = input.mode === "shadow";
 
+  if (isShadow) {
+    // Shadow mode: write to session_projections_shadow only -- do NOT touch live tables.
+    // Idempotency guard against the shadow watermark table.
+    const existing = (await db
+      .prepare("SELECT last_seq FROM session_projections_shadow WHERE session_id=? AND stage_idx IS NULL")
+      .get(input.sessionId)) as { last_seq: number } | undefined;
+    if (existing && existing.last_seq >= input.seq) return;
+
+    // Read the current patch_json so we can merge -- accumulate all projected fields.
+    const fullRow = (await db
+      .prepare("SELECT patch_json FROM session_projections_shadow WHERE session_id=? AND stage_idx IS NULL")
+      .get(input.sessionId)) as { patch_json: string | null } | undefined;
+    const merged = { ...(fullRow?.patch_json ? JSON.parse(fullRow.patch_json) : {}), ...input.patch };
+
+    await db
+      .prepare(
+        `INSERT INTO session_projections_shadow(session_id, stage_idx, last_seq, patch_json)
+         VALUES(?, NULL, ?, ?)
+         ON CONFLICT(session_id, COALESCE(stage_idx, -1)) DO UPDATE SET last_seq = excluded.last_seq, patch_json = excluded.patch_json`,
+      )
+      .run(input.sessionId, input.seq, JSON.stringify(merged));
+    return;
+  }
+
+  // Real mode (default): existing path.
   // Idempotency guard: skip if we've already applied an equal or later seq.
   const existing = (await db
     .prepare("SELECT last_seq FROM session_projections WHERE session_id=? AND stage_idx IS NULL")
