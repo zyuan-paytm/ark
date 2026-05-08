@@ -6,6 +6,11 @@ import type { FlowStore } from "../stores/flow-store.js";
 import type { ComputeRepository } from "../repositories/compute.js";
 import type { ArkConfig } from "../config.js";
 import type { SecretsCapability } from "../secrets/types.js";
+import type { AgentStore } from "../stores/agent-store.js";
+import type { RuntimeStore } from "../stores/runtime-store.js";
+import type { PluginRegistry } from "../plugins/registry.js";
+import type { FlowStateRepository } from "../repositories/flow-state.js";
+import type { StatusPollerRegistry } from "../executors/status-poller.js";
 
 /**
  * Narrow dependency set for orchestration functions.
@@ -23,6 +28,12 @@ export interface OrchestrationDeps {
   secrets: SecretsCapability;
   tenantId: string;
   arkDir: string;
+  /** Phase 3.5: dispatch helper port deps. */
+  agents: AgentStore;
+  runtimes: RuntimeStore;
+  pluginRegistry: PluginRegistry;
+  flowStates: FlowStateRepository;
+  statusPollers: StatusPollerRegistry;
 }
 
 /** Derive narrow deps from a full AppContext for local/transition use. */
@@ -38,5 +49,10 @@ export function depsFromApp(app: import("../app.js").AppContext): OrchestrationD
     secrets: app.mode.secrets,
     tenantId: app.tenantId!,
     arkDir: app.arkDir,
+    agents: app.agents,
+    runtimes: app.runtimes,
+    pluginRegistry: app.pluginRegistry,
+    flowStates: app.flowStates,
+    statusPollers: app.statusPollers,
   };
 }

@@ -18,11 +18,45 @@
 import type { DispatchDeps } from "../../services/dispatch/types.js";
 import type { OrchestrationDeps } from "../../services/deps.js";
 import type { BlobStore } from "../../storage/blob-store.js";
-import type { RuntimeStore } from "../../stores/runtime-store.js";
-import type { FlowStateRepository } from "../../repositories/flow-state.js";
 import type { ComputeService } from "../../services/compute.js";
-import type { PluginRegistry, PluginKind, PluginEntry } from "../../plugins/registry.js";
-import { StatusPollerRegistry } from "../../executors/status-poller.js";
+import type { AppContext } from "../../app.js";
+import { resolveAgentWithRuntime, buildClaudeArgs as buildClaudeArgsHelper } from "../../agent/agent.js";
+import { getExecutor } from "../../executor.js";
+import { buildTaskWithHandoff, extractSubtasks } from "../../services/task-builder.js";
+import { startStatusPoller } from "../../executors/status-poller.js";
+import { saveCheckpoint } from "../../session/checkpoint.js";
+
+/**
+ * Build a minimal AppContext-shaped shim from OrchestrationDeps. Used to bridge
+ * helpers that still take `app: AppContext` until their signatures are
+ * narrowed. The shim only exposes fields helpers actually read; accessing any
+ * other property surfaces as undefined (which is fine -- helpers fail loudly
+ * if they need fields the shim doesn't carry).
+ *
+ * This is intentionally a shim rather than a full refactor of every helper.
+ * Phase 3.5 ports run incrementally by extending OrchestrationDeps and adding
+ * fields here; Phase 3.5+ refactors helpers to take narrow deps directly and
+ * the shim shrinks toward zero.
+ */
+function buildAppShim(d: OrchestrationDeps): AppContext {
+  return {
+    sessions: d.sessions,
+    events: d.events,
+    messages: d.messages,
+    blobStore: d.blobStore,
+    flows: d.flows,
+    computes: d.computes,
+    agents: d.agents,
+    runtimes: d.runtimes,
+    pluginRegistry: d.pluginRegistry,
+    flowStates: d.flowStates,
+    statusPollers: d.statusPollers,
+    config: d.config,
+    arkDir: d.arkDir,
+    tenantId: d.tenantId,
+    mode: { kind: "hosted", secrets: d.secrets },
+  } as unknown as AppContext;
+}
 
 /**
  * DispatchDeps extended with OrchestrationDeps fields that Temporal activities
@@ -43,35 +77,7 @@ function notPortedYet(field: string): never {
   );
 }
 
-/** Minimal RuntimeStore stub. Throws on every access. */
-function stubRuntimeStore(): RuntimeStore {
-  return {
-    list: () => notPortedYet("runtimes.list"),
-    get: () => notPortedYet("runtimes.get"),
-    save: () => notPortedYet("runtimes.save"),
-    delete: () => notPortedYet("runtimes.delete"),
-  };
-}
-
-/** Minimal FlowStateRepository stub. Throws on every access. */
-function stubFlowStateRepository(): FlowStateRepository {
-  // FlowStateRepository is a class; we cast through unknown so the type
-  // checker is satisfied while keeping zero AppContext references.
-  const stub = {
-    setTenant: () => notPortedYet("flowStates.setTenant"),
-    getTenant: () => notPortedYet("flowStates.getTenant"),
-    load: () => notPortedYet("flowStates.load"),
-    save: () => notPortedYet("flowStates.save"),
-    setCurrentStage: () => notPortedYet("flowStates.setCurrentStage"),
-    markStageCompleted: () => notPortedYet("flowStates.markStageCompleted"),
-    markStageSkipped: () => notPortedYet("flowStates.markStageSkipped"),
-    initForSession: () => notPortedYet("flowStates.initForSession"),
-    getCompletedStages: () => notPortedYet("flowStates.getCompletedStages"),
-  };
-  return stub as unknown as FlowStateRepository;
-}
-
-/** Minimal ComputeService stub. Throws on every access. */
+/** Minimal ComputeService stub. Throws on every access. Phase 3.5 follow-up. */
 function stubComputeService(): ComputeService {
   const stub = {
     create: () => notPortedYet("computeService.create"),
@@ -82,19 +88,6 @@ function stubComputeService(): ComputeService {
     cloneTemplate: () => notPortedYet("computeService.cloneTemplate"),
   };
   return stub as unknown as ComputeService;
-}
-
-/** Minimal PluginRegistry stub. Throws on every access. */
-function stubPluginRegistry(): PluginRegistry {
-  return {
-    register: (_entry: PluginEntry<PluginKind>) => notPortedYet("pluginRegistry.register"),
-    unregister: () => notPortedYet("pluginRegistry.unregister"),
-    get: () => notPortedYet("pluginRegistry.get"),
-    getEntry: () => notPortedYet("pluginRegistry.getEntry"),
-    listByKind: () => notPortedYet("pluginRegistry.listByKind"),
-    clear: () => notPortedYet("pluginRegistry.clear"),
-    executor: () => notPortedYet("pluginRegistry.executor"),
-  };
 }
 
 // ── Factory ──────────────────────────────────────────────────────────────────
@@ -119,20 +112,16 @@ export function buildDispatchDeps(orchDeps: OrchestrationDeps): TemporalDispatch
     secrets: orchDeps.secrets,
     blobStore: orchDeps.blobStore,
 
-    // ── Stubs for fields absent from OrchestrationDeps ───────────────────────
-    // TODO(Phase 3.5): wire real runtimes store when migrating resolveAgent
-    runtimes: stubRuntimeStore(),
-    // TODO(Phase 3.5): wire real flowStates repository
-    flowStates: stubFlowStateRepository(),
-    // TODO(Phase 3.5): wire real computeService
+    // ── Phase 3.5 ports: real repos/stores from widened OrchestrationDeps ────
+    runtimes: orchDeps.runtimes,
+    flowStates: orchDeps.flowStates,
+    pluginRegistry: orchDeps.pluginRegistry,
+    statusPollers: orchDeps.statusPollers,
+    // computeService: still stubbed -- not in OrchestrationDeps yet. The
+    // dispatch chain only hits computeService.cloneTemplate for compute
+    // template resolution; the e2e stub-runner path uses compute_name="local"
+    // which short-circuits that branch.
     computeService: stubComputeService(),
-    // TODO(Phase 3.5): wire real pluginRegistry
-    pluginRegistry: stubPluginRegistry(),
-    // StatusPollerRegistry is a concrete class; supply an empty instance.
-    // The poller is not used on the Temporal hosted-mode path (scheduler
-    // manages compute lifecycle instead). Phase 3.5 will decide whether to
-    // pass a real registry here.
-    statusPollers: new StatusPollerRegistry(),
 
     // models is optional -- omit; raw agent.model flows through in that case.
 
@@ -144,27 +133,75 @@ export function buildDispatchDeps(orchDeps: OrchestrationDeps): TemporalDispatch
     // needed inside a Temporal activity.
     getScheduler: () => null,
 
-    // ── AppContext-dependent callbacks -- stubbed, Phase 3.5 ─────────────────
-    getStage: (_flowName, _stageName) => notPortedYet("getStage"),
-    getStageAction: (_flowName, _stageName) => notPortedYet("getStageAction"),
-    buildTask: (_session, _stage, _agentName) => notPortedYet("buildTask"),
-    extractSubtasks: (_session) => notPortedYet("extractSubtasks"),
-    materializeClaudeAuth: (_session, _compute) => notPortedYet("materializeClaudeAuth"),
-    resolveAgent: (_agentName, _sessionVars, _opts) => notPortedYet("resolveAgent"),
-    buildClaudeArgs: (_agent, _opts) => notPortedYet("buildClaudeArgs"),
-    resolveExecutor: (_runtime) => notPortedYet("resolveExecutor"),
+    // ── Phase 3.5 ports: read directly from FlowStore ────────────────────────
+    getStage: (flowName, stageName) => {
+      const f = orchDeps.flows.get(flowName);
+      // Hosted DB store can return a Promise on cache miss; treat as "not loaded".
+      if (f && typeof (f as { then?: unknown }).then === "function") return null;
+      const stages = (f as { stages?: any[] })?.stages ?? [];
+      return stages.find((s: { name: string }) => s.name === stageName) ?? null;
+    },
+    getStageAction: (flowName, stageName) => {
+      const f = orchDeps.flows.get(flowName);
+      if (f && typeof (f as { then?: unknown }).then === "function") return { type: "unknown" };
+      const stages = (f as { stages?: any[] })?.stages ?? [];
+      const stage = stages.find((s: { name: string }) => s.name === stageName);
+      if (!stage) return { type: "unknown" };
+      if (stage.for_each !== undefined) {
+        return { type: "for_each", on_failure: stage.on_failure, optional: stage.optional };
+      }
+      if (stage.type === "fork") {
+        return {
+          type: "fork",
+          agent: stage.agent ?? "implementer",
+          strategy: stage.strategy ?? "plan",
+          max_parallel: stage.max_parallel ?? 4,
+          on_failure: stage.on_failure,
+          optional: stage.optional,
+        };
+      }
+      if (stage.action) {
+        return { type: "action", action: stage.action, on_failure: stage.on_failure, optional: stage.optional };
+      }
+      if (stage.agent) {
+        return { type: "agent", agent: stage.agent, on_failure: stage.on_failure, optional: stage.optional };
+      }
+      return { type: "unknown", on_failure: stage.on_failure, optional: stage.optional };
+    },
+    // ── Phase 3.5 ports: helpers via AppContext shim from OrchestrationDeps ──
+    buildTask: (session, stage, agentName) => buildTaskWithHandoff(buildAppShim(orchDeps), session, stage, agentName),
+    extractSubtasks: (session) => extractSubtasks(buildAppShim(orchDeps), session),
+    resolveAgent: (agentName, sessionVars, opts) =>
+      resolveAgentWithRuntime(buildAppShim(orchDeps), agentName, sessionVars, opts),
+    buildClaudeArgs: (agent, opts) =>
+      buildClaudeArgsHelper(agent as any, {
+        autonomy: opts.autonomy,
+        projectRoot: opts.projectRoot,
+        app: buildAppShim(orchDeps),
+      }),
+    resolveExecutor: (runtime) => orchDeps.pluginRegistry.executor(runtime) ?? getExecutor(runtime),
 
-    // ── Lifecycle / follow-on -- stubbed, Phase 3.5 ───────────────────────────
-    checkpoint: (_sessionId) => notPortedYet("checkpoint"),
+    // materializeClaudeAuth: only used for claude-code runtime. stub-runner /
+    // Temporal e2e path doesn't hit it. Phase 3.5+ port reads secrets directly.
+    materializeClaudeAuth: (_session, _compute) => notPortedYet("materializeClaudeAuth"),
+
+    // ── Lifecycle / follow-on ─────────────────────────────────────────────────
+    checkpoint: (sessionId) => {
+      void saveCheckpoint({ sessions: orchDeps.sessions, events: orchDeps.events }, sessionId);
+    },
+    startStatusPoller: (sessionId, tmuxName, runtime) =>
+      startStatusPoller(buildAppShim(orchDeps), sessionId, tmuxName, runtime),
+
+    // mediateStageHandoff, executeAction, dispatchChild, fork: still stubbed.
+    // Each goes through SessionService/StageAdvanceService/DispatchService
+    // which carry their own AppContext-bound state. Porting is Phase 3.5+.
     mediateStageHandoff: (_sessionId, _opts) => notPortedYet("mediateStageHandoff"),
     executeAction: (_sessionId, _action) => notPortedYet("executeAction"),
     dispatchChild: (_childId) => notPortedYet("dispatchChild"),
     fork: (_parentId, _task, _opts) => notPortedYet("fork"),
-    startStatusPoller: (_sessionId, _tmuxName, _runtime) => notPortedYet("startStatusPoller"),
 
-    // ── Executor-interface coupling -- not portable without AppContext ─────────
-    // getApp is used only to satisfy LaunchOpts.app inside executor.launch().
-    // Migrating executors off AppContext is tracked separately (Phase 3.5+).
-    getApp: () => notPortedYet("getApp"),
+    // getApp: feeds the executor LaunchOpts.app coupling. The shim is enough
+    // for the executor to perform repo writes and event logging.
+    getApp: () => buildAppShim(orchDeps),
   };
 }
