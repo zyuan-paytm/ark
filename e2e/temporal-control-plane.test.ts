@@ -130,24 +130,170 @@ describe("T2 -- concurrent Temporal routing", () => {
   );
 });
 
-// ── T3-T5: deferred to Phase 3.5 ────────────────────────────────────────────
+// ── T3: review_gate parks durably across server restart ─────────────────────
 //
-// T3 (manual gate across server restart), T4 (fan-out / join race), and T5
-// (retry policy + non-retryable) all require dispatchStageActivity to drive
-// real launches. Phase 3 ships the workflow scaffolding (review_gate signals,
-// fan_out + stageWorkflow children, ApplicationFailure-tagged errors) but
-// the dispatch chain still throws at the stubbed-callback boundary in
-// buildDispatchDeps. Phase 3.5 ports the AppContext-dependent helpers and
-// these tests light up.
+// Phase 3.6-A: executeAction is ported via buildDispatchDeps shim; the worker
+// container installs stub-runner + flow YAMLs at boot. T3 verifies that the
+// review_gate stage parks the Temporal workflow via condition(), that the
+// workflow survives a server restart (Temporal holds the durable state), and
+// that an approveReviewGate signal unblocks and completes the session.
+//
+// Parking detection: projectStageActivity writes only a seq watermark to
+// session_projections (not a queryable stage-status column -- session_stages
+// table is not yet introduced). The session row status stays "ready" while
+// parked. We therefore wait for the session to be in a non-terminal "ready"
+// state long enough for the plan stage to have finished (~10 s), treating
+// persistent "ready" as the parked-at-gate signal before sending approve.
 
-describe("T3 -- manual gate across server restart (Phase 3.5)", () => {
-  test.todo("review_gate parks via condition() + signal -- needs dispatch helper port");
+describe("T3 -- manual gate across server restart", () => {
+  test(
+    "review_gate parks, survives server restart, resumes on approve",
+    async () => {
+      // 1. Copy e2e-review.yaml into arkDir/flows so the server can load it.
+      mkdirSync(join(arkDir, "flows"), { recursive: true });
+      copyFileSync(
+        join(REPO_ROOT, "e2e", "fixtures", "flows", "e2e-review.yaml"),
+        join(arkDir, "flows", "e2e-review.yaml"),
+      );
+
+      // 2. Start a session on the e2e-review flow.
+      const { session: created } = await rpc.call<{ session: any }>("session/start", {
+        flow: "e2e-review",
+        summary: "T3-review-gate-restart",
+      });
+      expect(created.orchestrator).toBe("temporal");
+
+      // 3. Wait for the workflow to move the session out of "pending" (i.e.
+      //    projectSessionActivity has patched status to "ready"). This proves
+      //    the workflow started and the plan stage began executing.
+      await waitFor(
+        () => rpc.call<{ session: any }>("session/read", { sessionId: created.id }),
+        (r) => r.session.status !== "pending",
+        { timeoutMs: 60_000, intervalMs: 1_000, description: "T3 session left pending" },
+      );
+
+      // 4. Give the plan stage (stub-runner) time to complete and let the
+      //    workflow advance to the review_gate stage and park there.
+      //    stub-runner completes in <1 s; 10 s is ample even under load.
+      await Bun.sleep(10_000);
+
+      // 5. Confirm the session is still non-terminal -- it is parked at the
+      //    review gate waiting for a signal.
+      const parked = await rpc.call<{ session: any }>("session/read", { sessionId: created.id });
+      expect(["completed", "failed"]).not.toContain(parked.session.status);
+
+      // 6. Kill and restart the server -- the Temporal workflow stays durably
+      //    parked; Temporal holds the condition state across worker restarts.
+      await killServer(server);
+      server = await spawnServer({
+        arkDir,
+        envFile: ENV_FILE,
+        startupTimeoutMs: 30_000,
+        extraEnv: {
+          ARK_TEMPORAL_ORCHESTRATION: "true",
+          ARK_TEMPORAL_SERVER_URL: "localhost:7234",
+          ARK_TEMPORAL_NAMESPACE: "default",
+        },
+      });
+      rpc = new RpcClient(server.webUrl);
+
+      // 7. Still parked after restart -- session row is unchanged.
+      const stillParked = await rpc.call<{ session: any }>("session/read", { sessionId: created.id });
+      expect(["completed", "failed"]).not.toContain(stillParked.session.status);
+
+      // 8. Approve via gate/approve -- this sends the approveReviewGate signal
+      //    to the Temporal workflow, unblocking the condition().
+      await rpc.call("gate/approve", { sessionId: created.id });
+
+      // 9. Session should complete now that the gate is open and close_ticket runs.
+      const final = await waitFor(
+        () => rpc.call<{ session: any }>("session/read", { sessionId: created.id }),
+        (r) => ["completed", "failed"].includes(r.session.status),
+        { timeoutMs: 60_000, intervalMs: 1_000, description: "T3 final" },
+      );
+      expect(final.session.status).toBe("completed");
+    },
+    180_000,
+  );
 });
+
+// ── T4: fan-out / join race ───────────────────────────────────────────────────
+//
+// Deferred: stageWorkflow children + Promise.all require fan_out stage type
+// and a suitable fixture flow. Tracked as Phase 3.5 follow-up.
 
 describe("T4 -- fan-out / join race (Phase 3.5)", () => {
   test.todo("stageWorkflow children + Promise.all -- needs dispatch helper port");
 });
 
-describe("T5 -- retry policy + non-retryable (Phase 3.5)", () => {
-  test.todo("flaky-pr action wired in core -- needs Temporal activity to reach action layer");
+// ── T5a: transient retry succeeds after N failures ───────────────────────────
+//
+// flaky_pr is configured to fail 3x with a transient "503 service unavailable"
+// error then succeed. Temporal's default retry policy retries on non-application
+// failures, so the activity retries and the session eventually completes.
+
+describe("T5a -- transient retry succeeds after 3 failures", () => {
+  test(
+    "flaky_pr retries 3x then completes session",
+    async () => {
+      mkdirSync(join(arkDir, "flows"), { recursive: true });
+      copyFileSync(
+        join(REPO_ROOT, "e2e", "fixtures", "flows", "e2e-retry.yaml"),
+        join(arkDir, "flows", "e2e-retry.yaml"),
+      );
+
+      const { session: created } = await rpc.call<{ session: any }>("session/start", {
+        flow: "e2e-retry",
+        summary: "T5a-transient-retry",
+      });
+      expect(created.orchestrator).toBe("temporal");
+
+      // flaky_pr fails 3x then succeeds; retries add latency so allow 120 s.
+      const final = await waitFor(
+        () => rpc.call<{ session: any }>("session/read", { sessionId: created.id }),
+        (r) => ["completed", "failed"].includes(r.session.status),
+        { timeoutMs: 120_000, intervalMs: 1_000, description: "T5a final" },
+      );
+      // flaky_pr is configured to fail 3x then succeed -- session must complete.
+      expect(final.session.status).toBe("completed");
+    },
+    150_000,
+  );
+});
+
+// ── T5b: non-retryable AuthError fails fast ───────────────────────────────────
+//
+// flaky_pr configured with fail_times=999 and error="AuthError". The action
+// layer throws an ApplicationFailure with nonRetryable=true for AuthError,
+// so Temporal propagates the failure immediately without exhausting retries.
+
+describe("T5b -- non-retryable AuthError fails fast", () => {
+  test(
+    "AuthError causes immediate session failure (no retries)",
+    async () => {
+      mkdirSync(join(arkDir, "flows"), { recursive: true });
+      copyFileSync(
+        join(REPO_ROOT, "e2e", "fixtures", "flows", "e2e-retry-nonretryable.yaml"),
+        join(arkDir, "flows", "e2e-retry-nonretryable.yaml"),
+      );
+
+      const started = Date.now();
+      const { session: created } = await rpc.call<{ session: any }>("session/start", {
+        flow: "e2e-retry-nonretryable",
+        summary: "T5b-auth-fail-fast",
+      });
+      expect(created.orchestrator).toBe("temporal");
+
+      const final = await waitFor(
+        () => rpc.call<{ session: any }>("session/read", { sessionId: created.id }),
+        (r) => ["completed", "failed"].includes(r.session.status),
+        { timeoutMs: 60_000, intervalMs: 500, description: "T5b final" },
+      );
+      expect(final.session.status).toBe("failed");
+      // Non-retryable failures propagate within ~2-3 s on local Temporal stack.
+      // The 60 s bound above is generous; assert we didn't exhaust retry delays.
+      expect(Date.now() - started).toBeLessThan(60_000);
+    },
+    90_000,
+  );
 });
