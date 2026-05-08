@@ -5,4 +5,5 @@ COPY package.json bun.lock* ./
 # runs in Postgres mode (DATABASE_URL set) and never touches bun:sqlite.
 RUN bun install --frozen-lockfile --ignore-scripts
 COPY . .
-CMD ["bun", "run", "packages/core/temporal/worker.ts"]
+RUN chmod +x scripts/temporal-worker-entrypoint.sh
+CMD ["scripts/temporal-worker-entrypoint.sh"]

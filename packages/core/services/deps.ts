@@ -11,6 +11,7 @@ import type { RuntimeStore } from "../stores/runtime-store.js";
 import type { PluginRegistry } from "../plugins/registry.js";
 import type { FlowStateRepository } from "../repositories/flow-state.js";
 import type { StatusPollerRegistry } from "../executors/status-poller.js";
+import type { DatabaseAdapter } from "../database/index.js";
 
 /**
  * Narrow dependency set for orchestration functions.
@@ -34,6 +35,8 @@ export interface OrchestrationDeps {
   pluginRegistry: PluginRegistry;
   flowStates: FlowStateRepository;
   statusPollers: StatusPollerRegistry;
+  /** Phase 3.6: raw DB adapter for idempotency ledger in executeAction. */
+  db: DatabaseAdapter;
 }
 
 /** Derive narrow deps from a full AppContext for local/transition use. */
@@ -54,5 +57,6 @@ export function depsFromApp(app: import("../app.js").AppContext): OrchestrationD
     pluginRegistry: app.pluginRegistry,
     flowStates: app.flowStates,
     statusPollers: app.statusPollers,
+    db: app.db,
   };
 }

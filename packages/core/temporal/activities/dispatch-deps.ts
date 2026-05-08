@@ -25,6 +25,7 @@ import { getExecutor } from "../../executor.js";
 import { buildTaskWithHandoff, extractSubtasks } from "../../services/task-builder.js";
 import { startStatusPoller } from "../../executors/status-poller.js";
 import { saveCheckpoint } from "../../session/checkpoint.js";
+import { executeAction } from "../../services/actions/index.js";
 
 /**
  * Build a minimal AppContext-shaped shim from OrchestrationDeps. Used to bridge
@@ -54,6 +55,7 @@ function buildAppShim(d: OrchestrationDeps): AppContext {
     config: d.config,
     arkDir: d.arkDir,
     tenantId: d.tenantId,
+    db: d.db,
     mode: { kind: "hosted", secrets: d.secrets },
   } as unknown as AppContext;
 }
@@ -192,11 +194,11 @@ export function buildDispatchDeps(orchDeps: OrchestrationDeps): TemporalDispatch
     startStatusPoller: (sessionId, tmuxName, runtime) =>
       startStatusPoller(buildAppShim(orchDeps), sessionId, tmuxName, runtime),
 
-    // mediateStageHandoff, executeAction, dispatchChild, fork: still stubbed.
+    // mediateStageHandoff, dispatchChild, fork: still stubbed.
     // Each goes through SessionService/StageAdvanceService/DispatchService
     // which carry their own AppContext-bound state. Porting is Phase 3.5+.
     mediateStageHandoff: (_sessionId, _opts) => notPortedYet("mediateStageHandoff"),
-    executeAction: (_sessionId, _action) => notPortedYet("executeAction"),
+    executeAction: (sessionId, action) => executeAction(buildAppShim(orchDeps), sessionId, action),
     dispatchChild: (_childId) => notPortedYet("dispatchChild"),
     fork: (_parentId, _task, _opts) => notPortedYet("fork"),
 
