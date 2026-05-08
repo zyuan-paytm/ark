@@ -35,7 +35,7 @@ export async function awaitStageCompletionActivity(input: {
 
     const session = await d.sessions.get(input.sessionId);
     if (!session) {
-      await Bun.sleep(POLL_MS);
+      await new Promise((r) => setTimeout(r, POLL_MS));
       continue;
     }
 
@@ -47,7 +47,7 @@ export async function awaitStageCompletionActivity(input: {
       return { status: mapped };
     }
 
-    await Bun.sleep(POLL_MS);
+    await new Promise((r) => setTimeout(r, POLL_MS));
   }
 
   return { status: "failed", error: "awaitStageCompletion timed out" };
