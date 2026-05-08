@@ -32,6 +32,8 @@ import * as m013 from "./013_eval_session_type.js";
 import * as m014 from "./014_workspaces.js";
 // Migration 015: Temporal workflow_id columns + session_projections sidecar tables.
 import * as m015 from "./015_temporal_columns.js";
+// Migration 016: pty_cols / pty_rows columns on sessions (Postgres schema parity).
+import * as m016 from "./016_pty_cols.js";
 
 export const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: m001.VERSION, name: m001.NAME, up: m001.up },
@@ -53,4 +55,5 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: m013.VERSION, name: m013.NAME, up: m013.up },
   { version: m014.VERSION, name: m014.NAME, up: m014.up },
   { version: m015.VERSION, name: m015.NAME, up: m015.up },
+  { version: m016.VERSION, name: m016.NAME, up: m016.up },
 ];

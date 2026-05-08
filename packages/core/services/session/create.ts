@@ -138,6 +138,14 @@ export class SessionCreator {
       };
     }
 
+    // If a Temporal workflow starter is wired (hosted mode + orchestration flag),
+    // stamp the session as temporal before persisting so the orchestrator column
+    // is correct from the first DB write.
+    const usesTemporal = typeof d.startTemporalWorkflow === "function";
+    if (usesTemporal) {
+      (mergedOpts as Record<string, unknown>).orchestrator = "temporal";
+    }
+
     const session = await d.sessions.create(mergedOpts as StartSessionOpts);
 
     // Inline flow persistence + ephemeral registration. We use a per-session
@@ -222,6 +230,15 @@ export class SessionCreator {
       const agentLabel =
         typeof action.agent === "string" ? action.agent : ((action.agent as { name?: string })?.name ?? "inline");
       emitStageSpanStart(session.id, { stage: firstStage, agent: agentLabel, gate: "auto" });
+    }
+
+    // If Temporal is wired, start the workflow and stamp workflow_id on the row.
+    // This runs after the stage/status columns are set so the worker picks up
+    // an already-advanced session when it first queries.
+    if (usesTemporal && d.startTemporalWorkflow) {
+      const tenantId = d.sessions.getTenant?.() ?? "default";
+      const wfId = await d.startTemporalWorkflow(session.id, flowName, tenantId);
+      await d.sessions.update(session.id, { workflow_id: wfId } as Partial<Session>);
     }
 
     hooks?.onCreated?.(session.id);

@@ -114,6 +114,9 @@ export class SessionService {
         ],
       });
       await this.sessions.update(session.id, { workflow_id: wfId } as Partial<Session>);
+      // Kick the bespoke dispatch engine so stages run while the workflow watches.
+      // Phase 2: the workflow monitors completion; Phase 3 will drive dispatch itself.
+      this.dispatchListeners.emit(session.id);
     }
 
     return (await this.sessions.get(session.id))!;
