@@ -1,19 +1,19 @@
 /**
  * claude-agent executor -- builds a launcher script + delegates to the
- * arkd-backed provider for ALL dispatches. One uniform path: local arkd
- * vs remote-arkd (over SSM tunnel) is the provider's concern; this
- * executor doesn't see the difference.
+ * compute target's arkd-backed handle for ALL dispatches. One uniform
+ * path: local arkd vs remote-arkd (over SSM tunnel) is the compute's
+ * concern; this executor doesn't see the difference.
  *
- *   provider.spawnProcess(compute, session, { handle, cmd, args, workdir, logPath })
+ *   computeHandle.spawnProcess({ handle, cmd, args, workdir, logPath })
  *     -> arkd `/process/spawn` (generic, no tmux)
  *     -> launcher writes task.txt, runs `ark run-agent-sdk`, exits when
  *        the SDK loop returns end_turn (or aborts on SIGTERM)
  *     -> hooks publish to arkd's `hooks` channel; conductor subscribes
  *        via `/channel/hooks/subscribe`
  *
- * Status / kill / capture / sendUserMessage all defer to provider methods
- * (`statusProcessByHandle`, `killProcessByHandle`, `captureOutput`,
- * `sendUserMessage`) so lifecycle calls go through the same wire.
+ * Status / kill / capture / sendUserMessage all defer to handle methods
+ * (`statusProcess`, `killProcess`, `agent.captureOutput`,
+ * `agent.sendUserMessage`) so lifecycle calls go through the same wire.
  */
 
 import { mkdirSync, appendFileSync } from "fs";
@@ -42,7 +42,14 @@ export function buildAgentSdkRuntimeEnv(runtimeDef: unknown): Record<string, str
   const compat = Array.isArray(def?.compat)
     ? (def.compat as unknown[]).filter((c): c is string => typeof c === "string" && c.length > 0)
     : [];
-  if (compat.length > 0) env.ARK_COMPAT = compat.join(",");
+  // Dev escape hatch: when ARK_DEV_FORCE_DIRECT=1 is set in the operator's
+  // environment, skip propagating the runtime's `compat: ["bedrock"]` flag
+  // to the launcher. This routes the agent to direct Anthropic API instead
+  // of the TrueFoundry/Bedrock proxy. NEVER set this in real deployments --
+  // production wants centralized routing for cost / auth / audit control.
+  if (compat.length > 0 && process.env.ARK_DEV_FORCE_DIRECT !== "1") {
+    env.ARK_COMPAT = compat.join(",");
+  }
 
   const haiku = def?.runtime_config?.["claude-agent"]?.default_haiku_model;
   if (typeof haiku === "string" && haiku.length > 0) {
@@ -62,14 +69,15 @@ export const claudeAgentExecutor: Executor = {
       return { ok: false, handle: "", message: `Session ${opts.sessionId} not found` };
     }
 
-    if (app.mode.kind === "hosted") {
+    if (app.mode.kind === "hosted" && process.env.ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE !== "1") {
       return {
         ok: false,
         handle: "",
         message:
           "claude-agent executor is local-mode only -- per-session state writes to the conductor's " +
           "tracks dir which lives on the pod's ephemeral disk in hosted mode. Use claude-code on a " +
-          "real compute target for hosted deployments.",
+          "real compute target for hosted deployments. " +
+          "For laptop dev (docker-compose), set ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE=1.",
       };
     }
 
@@ -91,41 +99,46 @@ export const claudeAgentExecutor: Executor = {
       }
     };
 
-    // Resolve provider + compute. claude-agent always runs on an arkd-backed
-    // provider (local-arkd, remote-arkd-ec2, remote-arkd-k8s, ...). Anything
-    // else means the compute row is misconfigured.
-    const { provider, compute } = await app.resolveProvider(session);
-    if (!provider || !compute) {
+    // Resolve compute target. claude-agent always runs on an arkd-backed
+    // compute (local, ec2, k8s, ...). Anything else means the compute row
+    // is misconfigured.
+    const { target, compute } = await app.resolveComputeTarget(session);
+    if (!target || !compute) {
       const msg = `no compute resolved for session.compute_name='${session.compute_name ?? "(none)"}'`;
       logError("session", `claude-agent.launch: ${msg}`, { sessionId: session.id });
       return { ok: false, handle: "", message: msg };
     }
-    if (!provider.spawnProcess) {
-      const msg = `provider '${provider.name}' has no spawnProcess; claude-agent requires arkd /process/spawn`;
-      logError("session", `claude-agent.launch: ${msg}`, { sessionId: session.id, provider: provider.name });
-      return { ok: false, handle: "", message: msg };
-    }
-    logInfo("session", "claude-agent.launch: provider resolved", {
+    logInfo("session", "claude-agent.launch: compute target resolved", {
       sessionId: session.id,
-      provider: provider.name,
       compute: compute.name,
       computeKind: compute.compute_kind,
+      isolationKind: compute.isolation_kind,
     });
 
     const { setupSessionWorktree } = await import("../services/worktree/index.js");
-    const effectiveWorkdir = await setupSessionWorktree(app, session, compute, provider, log);
+    const effectiveWorkdir = await setupSessionWorktree(app, session, compute, log);
 
     // Worker-side paths. We use `/tmp/ark-<sid>` UNIFORMLY -- local and
     // remote both. For local dispatch worker == conductor so /tmp lives on
     // the same filesystem; for remote it's the worker's /tmp. The agent
     // writes transcript.jsonl + stdio.log into this dir; the conductor
     // reads them back via arkd's /file/read regardless of where it runs.
-    // `provider.resolveWorkdir` is the only path question still polymorphic
-    // because workdir CAN be a real worktree directory the provider
+    // `compute.resolveWorkdir` is the only path question still polymorphic
+    // because workdir CAN be a real worktree directory the compute
     // controls (e.g. EC2 maps the cloned repo to /home/ubuntu/Projects/...);
-    // session scratch is always /tmp/ark-<sid>.
+    // session scratch is always /tmp/ark-<sid>. resolveWorkdir takes a
+    // ComputeHandle but at this point we don't have one yet -- the lifecycle
+    // builds the handle later. Use attachExistingHandle for the path
+    // computation; falls back to effectiveWorkdir when the row hasn't been
+    // provisioned yet (the lifecycle below will provision and re-resolve).
     const workerSessionDir = `/tmp/ark-${session.id}`;
-    const workerWorkdir = provider.resolveWorkdir?.(compute, session) ?? effectiveWorkdir ?? null;
+    const previewHandle = target.compute.attachExistingHandle?.({
+      name: compute.name,
+      status: compute.status,
+      config: (compute.config ?? {}) as Record<string, unknown>,
+    });
+    const workerWorkdir =
+      (previewHandle && target.compute.resolveWorkdir?.(previewHandle, session)) ?? effectiveWorkdir ?? null;
     const workerPromptFile = `${workerSessionDir}/task.txt`;
     const workerLauncherPath = `${workerSessionDir}/launcher.sh`;
     const workerLogPath = `${workerSessionDir}/stdio.log`;
@@ -146,7 +159,7 @@ export const claudeAgentExecutor: Executor = {
       ARK_SESSION_DIR: workerSessionDir,
       ARK_WORKTREE: workerWorkdir ?? session.workdir ?? session.repo ?? "",
       ARK_PROMPT_FILE: workerPromptFile,
-      ARK_ARKD_URL: "http://localhost:19300",
+      ARK_ARKD_URL: process.env.ARK_ARKD_URL ?? `http://localhost:${app.config.ports.arkd}`,
     };
     // Stage is baked in at provision time -- once the runtime is up, this
     // label is immutable and stamped onto every hook the agent emits.
@@ -164,6 +177,15 @@ export const claudeAgentExecutor: Executor = {
 
     const runtimeDef = await app.runtimes?.get?.("claude-agent");
     Object.assign(arkEnv, buildAgentSdkRuntimeEnv(runtimeDef));
+
+    // Propagate the dev-direct escape hatch into the launcher's child env so
+    // launch.ts's hard ANTHROPIC_API_KEY check can fall through to the bundled
+    // claude binary's native auth (~/.claude/credentials.json on linux,
+    // macOS keychain on darwin) when no API key is configured. Pairs with the
+    // matching gates in resolve-stage.ts and Model.transportKey.
+    if (process.env.ARK_DEV_FORCE_DIRECT === "1") {
+      arkEnv.ARK_DEV_FORCE_DIRECT = "1";
+    }
 
     // Secrets (ANTHROPIC_API_KEY etc.) take precedence -- last-write-wins.
     const secretEnv = opts.env ?? {};
@@ -190,18 +212,18 @@ export const claudeAgentExecutor: Executor = {
       "",
     ].join("\n");
 
-    log(`Launching claude-agent via ${provider.name} -> arkd /process/spawn (handle=${handle})`);
+    log(`Launching claude-agent via ${compute.compute_kind} -> arkd /process/spawn (handle=${handle})`);
 
     // Run the provisioning lifecycle (compute-start / ensure-reachable /
     // flush-secrets / prepare-workspace / isolation-prepare) and spawn
     // the launcher via /process/spawn. ensure-reachable sets up the SSM
     // tunnel and stores arkd_local_forward_port on session.config -- we
-    // can only resolve provider.getArkdUrl AFTER that step, so the
+    // can only resolve compute.getArkdUrl AFTER that step, so the
     // launcher write happens INSIDE launchOverride.
     const { resolveTargetAndHandle } = await import("../services/dispatch/target-resolver.js");
     const { runTargetLifecycle } = await import("../services/dispatch/target-lifecycle.js");
-    const { target, handle: computeHandle } = await resolveTargetAndHandle(app, session);
-    if (!target || !computeHandle) {
+    const { target: lifecycleTarget, handle: computeHandle } = await resolveTargetAndHandle(app, session);
+    if (!lifecycleTarget || !computeHandle) {
       return { ok: false, handle: "", message: "no compute target resolved for claude-agent dispatch" };
     }
 
@@ -209,7 +231,7 @@ export const claudeAgentExecutor: Executor = {
       await runTargetLifecycle(
         app,
         session.id,
-        target,
+        lifecycleTarget,
         computeHandle,
         {
           // tmuxName + launcherContent fields are inert here -- the launchOverride
@@ -230,13 +252,10 @@ export const claudeAgentExecutor: Executor = {
           computeStatus: compute.status,
           launchOverride: async () => {
             // ensure-reachable has run by now -- session.config.arkd_local_forward_port
-            // is set for remote dispatches. Re-fetch the session so getArkdUrl
-            // sees the freshly-stored port.
-            const refreshed = (await app.sessions.get(session.id)) ?? session;
-            const arkdUrl = provider.getArkdUrl?.(compute, refreshed);
-            if (!arkdUrl) {
-              throw new Error(`provider '${provider.name}' has no getArkdUrl`);
-            }
+            // is set for remote dispatches. The compute's getArkdUrl reads from
+            // the (possibly-mutated-in-place) handle.meta which now reflects the
+            // freshly-set tunnel port.
+            const arkdUrl = lifecycleTarget.compute.getArkdUrl(computeHandle);
             logInfo("session", "claude-agent.launch: writing launcher", {
               sessionId: session.id,
               arkdUrl,
@@ -255,14 +274,17 @@ export const claudeAgentExecutor: Executor = {
               path: workerLauncherPath,
             });
 
-            logInfo("session", "claude-agent.launch: invoking provider.spawnProcess", {
+            logInfo("session", "claude-agent.launch: invoking handle.spawnProcess", {
               sessionId: session.id,
               handle,
               cmd: `bash ${workerLauncherPath}`,
               workdir: workerWorkdir || "/tmp",
             });
+            if (!computeHandle.spawnProcess) {
+              throw new Error(`compute kind '${lifecycleTarget.compute.kind}' has no spawnProcess on its handle`);
+            }
             const t0 = Date.now();
-            const res = await provider.spawnProcess!(compute, refreshed, {
+            const res = await computeHandle.spawnProcess({
               handle,
               // Absolute path: arkd-on-EC2 runs under a systemd unit with
               // a restrictive PATH and bare `bash` ENOENTs at posix_spawn
@@ -288,7 +310,7 @@ export const claudeAgentExecutor: Executor = {
       const msg = `launch failed: ${err?.message ?? err}`;
       logError("session", `claude-agent.launch: ${msg}`, {
         sessionId: session.id,
-        provider: provider.name,
+        compute: compute.name,
         handle,
       });
       return { ok: false, handle: "", message: msg };
@@ -300,36 +322,44 @@ export const claudeAgentExecutor: Executor = {
   },
 
   async kill(_handle: string): Promise<void> {
-    // Lifecycle goes through provider.killProcessByHandle / killAgent
+    // Lifecycle goes through ComputeHandle.killProcess / AgentHandle.kill
     // which the SessionTerminator already calls directly. The handle-only
-    // signature here has no provider context, so this is a no-op.
+    // signature here has no compute context, so this is a no-op.
   },
 
   async terminate(_handle: string): Promise<void> {
-    // Same rationale as kill -- provider methods are the canonical path.
+    // Same rationale as kill -- handle-bound methods are the canonical path.
   },
 
   async status(_handle: string): Promise<ExecutorStatus> {
-    // Status comes from arkd via provider.statusProcessByHandle; the
+    // Status comes from arkd via ComputeHandle.statusProcess; the
     // status-poller calls that with the session row in hand. Returning
     // "running" here would be wrong (we have no session context); "idle"
-    // signals "ask the provider".
+    // signals "ask the compute".
     return { state: "idle" };
   },
 
-  async probeStatus({ session, handle, compute, provider }) {
+  async probeStatus({ app, session, handle }) {
     // claude-agent runs as a Bun process spawned via arkd /process/spawn,
-    // NOT in tmux. The default `provider.checkSession` would query
-    // /agent/status (tmux has-session) and always return false for a
+    // NOT in tmux. The default `AgentHandle.checkAlive` queries
+    // /agent/status (tmux has-session) and always returns false for a
     // process-based handle, flipping the row to completed within ~3s of
-    // launch (#435). Use /process/status, which kill(pid, 0)s the actual
-    // PID arkd recorded at spawn time.
-    if (!provider.statusProcessByHandle) {
-      // Provider can't tell us about processes -- safest answer is
+    // launch (#435). Use /process/status via the compute handle, which
+    // kill(pid, 0)s the actual PID arkd recorded at spawn time.
+    const tenantApp = session.tenant_id ? app.forTenant(session.tenant_id) : app;
+    const { target, compute } = await tenantApp.resolveComputeTarget(session);
+    if (!target || !compute) return { state: "running" };
+    const computeHandle = target.compute.attachExistingHandle?.({
+      name: compute.name,
+      status: compute.status,
+      config: (compute.config ?? {}) as Record<string, unknown>,
+    });
+    if (!computeHandle?.statusProcess) {
+      // Compute handle can't tell us about processes -- safest answer is
       // "still running" so we don't false-positive into completed.
       return { state: "running" };
     }
-    const status = await provider.statusProcessByHandle(compute, session, handle);
+    const status = await computeHandle.statusProcess(handle);
     if (status.running) return { state: "running", pid: status.pid };
     if (typeof status.exitCode === "number") {
       return status.exitCode === 0
@@ -355,22 +385,27 @@ export const claudeAgentExecutor: Executor = {
       return { ok: false, message: "session has no active agent" };
     }
     const tenantApp = session.tenant_id ? app.forTenant(session.tenant_id) : app;
-    const { provider, compute } = await tenantApp.resolveProvider(session);
-    if (!provider?.sendUserMessage || !compute) {
-      const msg = "claude-agent has no reachable arkd-backed provider for this session";
-      logError("session", `claude-agent.sendUserMessage: ${msg}`, {
-        sessionId: session.id,
-        providerName: provider?.name,
-        hasSendUserMessage: !!provider?.sendUserMessage,
-      });
+    const { target, compute } = await tenantApp.resolveComputeTarget(session);
+    if (!target || !compute) {
+      const msg = "claude-agent has no reachable compute target for this session";
+      logError("session", `claude-agent.sendUserMessage: ${msg}`, { sessionId: session.id });
       return { ok: false, message: msg };
     }
     try {
+      const computeHandle = target.compute.attachExistingHandle?.({
+        name: compute.name,
+        status: compute.status,
+        config: (compute.config ?? {}) as Record<string, unknown>,
+      });
+      if (!computeHandle) {
+        return { ok: false, message: "compute handle could not be rehydrated" };
+      }
+      const agent = target.isolation.attachAgent(target.compute, computeHandle, session.session_id);
       const t0 = Date.now();
-      await provider.sendUserMessage(compute, session, message);
+      await agent.sendUserMessage(message);
       logInfo("session", "claude-agent.sendUserMessage: published to user-input channel", {
         sessionId: session.id,
-        provider: provider.name,
+        compute: compute.name,
         bytes: message.length,
         elapsedMs: Date.now() - t0,
       });
@@ -378,7 +413,7 @@ export const claudeAgentExecutor: Executor = {
     } catch (e: any) {
       logError("session", `claude-agent.sendUserMessage: publish failed: ${e?.message ?? e}`, {
         sessionId: session.id,
-        provider: provider.name,
+        compute: compute.name,
       });
       return { ok: false, message: `user-message publish failed: ${e?.message ?? e}` };
     }

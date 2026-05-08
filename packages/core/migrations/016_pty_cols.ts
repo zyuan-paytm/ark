@@ -8,5 +8,5 @@ export async function up(ctx: MigrationApplyContext): Promise<void> {
   if (ctx.dialect === "postgres") {
     await applyPostgresPtyCols(ctx.db);
   }
-  // SQLite: schema.ts already declares pty_cols / pty_rows -- no-op.
+  // SQLite: schema.ts already declares pty_cols / pty_rows -- no-op
 }

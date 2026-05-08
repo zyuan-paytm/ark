@@ -92,7 +92,12 @@ const sessionOpResult = z.object({
   sessionId: z.string().optional(),
 });
 
-const computeProviderSchema = z.enum(["local", "docker", "ec2", "remote-arkd"]);
+// Legacy provider-name label kept on the wire for back-compat clients. The
+// canonical compute identity is now `compute_kind` + `isolation_kind`; the
+// legacy label is derived from that pair (see `legacyProviderLabel` in the
+// resource-compute handler). z.string() instead of z.enum() because new
+// pairs (k8s+kata, ec2+devcontainer, ...) ship labels not in the old enum.
+const computeProviderSchema = z.string();
 const computeStatusSchema = z.enum(["stopped", "running", "provisioning", "destroyed"]);
 
 const computeSchema = z
@@ -1657,6 +1662,87 @@ export type FsListDirResponse = z.infer<typeof fsListDirResponse>;
 export interface RpcMethodSchemas {
   request: z.ZodType<unknown>;
   response: z.ZodType<unknown>;
+}
+
+// ── worker/* ─────────────────────────────────────────────────────────────────
+// Phase B JSON-RPC worker-registry methods. Type-only (no Zod schemas needed
+// client-side; server validates via `extract`).
+
+export interface WorkerRegisterParams {
+  id: string;
+  url: string;
+  capacity?: number;
+  compute_name?: string;
+  tenant_id?: string;
+  metadata?: Record<string, unknown>;
+}
+export interface WorkerRegisterResult {
+  status: "registered";
+  id: string;
+}
+export interface WorkerHeartbeatParams {
+  id: string;
+}
+export interface WorkerHeartbeatResult {
+  status: "ok";
+}
+export interface WorkerDeregisterParams {
+  id: string;
+}
+export interface WorkerDeregisterResult {
+  status: "deregistered";
+  id: string;
+}
+export interface WorkerListResult {
+  workers: Array<{ id: string; url: string; [k: string]: unknown }>;
+}
+
+// ── channel/* ─────────────────────────────────────────────────────────────────
+
+export interface ChannelDeliverParams {
+  sessionId: string;
+  report: Record<string, unknown>;
+}
+export interface ChannelRelayParams {
+  toSession: string;
+  payload: Record<string, unknown>;
+  fromSession?: string;
+}
+
+// ── hook/* ─────────────────────────────────────────────────────────────────────
+
+export interface HookForwardParams {
+  sessionId: string;
+  payload: Record<string, unknown>;
+}
+
+// ── session/stdio + session/transcript ─────────────────────────────────────────
+
+export interface SessionStdioResult {
+  content: string;
+  size: number;
+  exists: boolean;
+}
+export interface SessionTranscriptResult {
+  messages: unknown[];
+  size: number;
+  exists: boolean;
+}
+
+// ── log/subscribe ─────────────────────────────────────────────────────────────
+
+export interface LogSubscribeResult {
+  initial: string;
+  size: number;
+  exists: boolean;
+}
+
+// ── terminal/subscribe ────────────────────────────────────────────────────────
+
+export interface TerminalSubscribeResult {
+  handle: string;
+  streamHandle: string;
+  initialBuffer: string | null;
 }
 
 export const rpcMethodSchemas: Record<string, RpcMethodSchemas> = {

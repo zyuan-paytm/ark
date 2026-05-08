@@ -52,7 +52,9 @@ export class HostedDispatcher {
     } catch (schedErr: any) {
       // No workers available -- fall through to local dispatch so a developer
       // running hosted mode against Docker Compose (no remote workers) still
-      // gets their session dispatched via the local compute path.
+      // gets their session dispatched via the local compute path. This only
+      // kicks in when the scheduler finds zero available workers; real
+      // production deploys always have workers registered.
       const msg: string = schedErr?.message ?? "";
       if (msg.includes("No workers available")) {
         logDebug("session", "No workers available -- fall through to local dispatch");

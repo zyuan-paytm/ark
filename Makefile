@@ -5,13 +5,14 @@
 # Quick reference:
 #   make install       Install deps + symlink ark CLI
 #   make claude-tfy    Claude Code -> TrueFoundry (direct; --continue + skip-permissions on by default)
+#   make pi-tfy        pi.dev CLI -> TrueFoundry (uses ~/.pi/agent/models.json's `truefoundry` provider)
 #   make dev           Hot-reload CLI + Web UI (two processes)
 #   make test          Run all unit tests (sequential)
 #   make test-e2e      Run Playwright E2E tests against Web UI
 #   make build         Build native macOS binary + Electron app
 #   make package       Package everything for distribution
 
-.PHONY: help install dev dev-daemon dev-arkd dev-web dev-temporal dev-temporal-down claude-tfy web desktop \
+.PHONY: help install dev dev-daemon dev-arkd dev-web dev-temporal dev-temporal-down dev-control-plane dev-control-plane-down claude-tfy pi-tfy web desktop \
         test test-file test-e2e test-e2e-fast test-e2e-web test-e2e-web-dev test-install test-watch lint lint-fix \
         format format-check \
         docs-cli \
@@ -36,10 +37,10 @@ CLAUDE_CONTINUE_FLAGS := $(if $(filter 0,$(CLAUDE_CONTINUE)),,--continue)
 help: ## Show available commands
 	@echo ""
 	@echo "  \033[1mDevelopment\033[0m"
-	@grep -E '^(install|dev|dev-daemon|dev-arkd|dev-web|claude-tfy|web|desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(install|dev|dev-daemon|dev-arkd|dev-web|dev-stack|dev-stack-down|dev-control-plane|dev-control-plane-down|claude-tfy|pi-tfy|web|desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1mTesting\033[0m"
-	@grep -E '^(test|test-file|test-compute-e2e|test-e2e|test-install|test-watch|lint|format):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(test|test-file|test-e2e|test-install|test-watch|lint|format):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1mBuilding & Packaging\033[0m"
 	@grep -E '^(build|build-cli|build-web|build-desktop|package|package-cli|package-desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -114,6 +115,37 @@ dev-temporal-down: ## Stop and remove the local Temporal cluster + its data volu
 	docker compose -f .infra/docker-compose.temporal.yaml -p ark-temporal down -v
 	@echo "Ark local Temporal cluster stopped."
 
+# Pick whichever docker compose CLI is on PATH. Modern installs ship the
+# plugin (`docker compose`); older engines + the standalone v2 release
+# ship as `docker-compose`. Some laptop setups have only one of the two.
+DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+
+dev-stack: build-web ## Start local Ark dev stack (Postgres :15433 + Redis :6379) and build web bundle
+	@command -v docker >/dev/null 2>&1 || { echo "Docker required. Install Docker Desktop."; exit 1; }
+	@echo "\033[1mStarting Ark dev stack (Postgres + Redis)...\033[0m"
+	$(DOCKER_COMPOSE) -f .infra/docker-compose.dev.yaml -p ark-dev up -d --wait
+	@echo ""
+	@echo "  Postgres:  postgres://ark:ark@localhost:15433/ark"
+	@echo "  Redis:     redis://localhost:6379"
+	@echo ""
+	@echo "  Next: source .env.control-plane && bun packages/cli/index.ts server start --hosted"
+
+dev-stack-down: ## Stop and remove the local Ark dev stack + its data volumes
+	$(DOCKER_COMPOSE) -f .infra/docker-compose.dev.yaml -p ark-dev down -v
+	@echo "Ark local dev stack stopped."
+
+dev-control-plane: dev-stack ## Boot Ark in control-plane (hosted) mode against local Postgres + Redis
+	@test -f .env.control-plane || { echo ".env.control-plane missing -- copy from repo"; exit 1; }
+	@echo "\033[1mStarting Ark control-plane (hosted)...\033[0m"
+	@set -a && . ./.env.control-plane && set +a && \
+	  echo "  ARK_PROFILE=$$ARK_PROFILE  WEB=:$$ARK_WEB_PORT  DB=$$DATABASE_URL" && \
+	  exec $(BUN) packages/cli/index.ts server start --hosted --port $$ARK_WEB_PORT
+
+dev-control-plane-down: ## Stop the running hosted server (port from .env.control-plane)
+	@set -a && . ./.env.control-plane && set +a && \
+	  pid=$$(lsof -nP -iTCP:$$ARK_WEB_PORT -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	  if [ -n "$$pid" ]; then echo "Killing hosted server PID $$pid on :$$ARK_WEB_PORT"; kill $$pid; else echo "No hosted server listening on :$$ARK_WEB_PORT"; fi
+
 spike-temporal-bun: ## Run the Phase 0 Bun / Temporal worker compat spike
 	@./scripts/spike-temporal-bun.sh
 
@@ -141,6 +173,21 @@ claude-tfy: ## Claude Code -> TrueFoundry (direct; --continue unless CLAUDE_CONT
 	    exec claude $(CLAUDE_DANGEROUSLY_SKIP_FLAGS) $(CLAUDE_CONTINUE_FLAGS) $(ARGS); \
 	  fi
 
+# pi.dev (https://pi.dev) reads its provider table from ~/.pi/agent/models.json.
+# This target assumes you've already populated that file with a `truefoundry`
+# provider whose api=anthropic-messages and apiKey=<TFY JWT>. The model id
+# defaults to TRUEFOUNDRY_ANTHROPIC_MODEL_DEFAULT (same Bedrock allowlist slug
+# claude-tfy uses); override per-invocation with `make pi-tfy PI_MODEL=<id>`.
+# Pass extra pi args via ARGS, e.g. `make pi-tfy ARGS="-p 'one-shot prompt'"`.
+pi-tfy: ## pi.dev CLI -> TrueFoundry (reads ~/.pi/agent/models.json)
+	@command -v pi >/dev/null 2>&1 || { echo "pi not found. Install: https://pi.dev"; exit 1; }
+	@test -f $$HOME/.pi/agent/models.json || { \
+	  echo "Missing ~/.pi/agent/models.json -- configure providers first."; \
+	  echo "Schema: https://pi.dev/docs/latest/models"; \
+	  exit 1; }
+	@pi_m="$${PI_MODEL:-$(TRUEFOUNDRY_ANTHROPIC_MODEL_DEFAULT)}"; \
+	  exec pi --provider truefoundry --model "$$pi_m" $(ARGS)
+
 self: ## Dispatch full SDLC (plan->implement->review->PR) against THIS repo
 	@test -n "$(TASK)" || (echo 'Usage: make self TASK="<description>"'; exit 1)
 	./ark session start --recipe self-dogfood --summary "$(TASK)" --dispatch
@@ -161,9 +208,6 @@ desktop: build-web ## Launch the Electron desktop app
 test: build-web ## Run unit tests (parallel; excludes compute E2E and integration suites)
 	$(BUN) test --concurrency 4 \
 	  $$(find packages -name '*.test.ts' -o -name '*.test.tsx' | grep -v e2e | grep -v local-arkd | grep -v local-provider | grep -v /dist/ | sort)
-
-test-compute-e2e: build-web ## Run compute end-to-end tests (serial; share global local-arkd state)
-	$(BUN) test packages/compute/__tests__/e2e.test.ts packages/compute/__tests__/e2e-compute.test.ts --concurrency 1
 
 test-file: ## Run a single test: make test-file F=packages/core/__tests__/foo.test.ts
 	$(BUN) test $(F) --concurrency 4
@@ -188,21 +232,6 @@ test-e2e-control-plane-up: ## Bring up the e2e Docker stack only (debug aid)
 
 test-e2e-control-plane-down: ## Tear down the e2e Docker stack and volumes
 	$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e down -v
-
-test-e2e-temporal: ## Run Temporal e2e tests (T1-T5) against full docker stack
-	@command -v docker >/dev/null 2>&1 || { echo "Docker required for temporal e2e."; exit 1; }
-	@command -v tmux >/dev/null 2>&1 || { echo "tmux required for temporal e2e (brew install tmux)."; exit 1; }
-	@echo "\033[1mRunning Temporal e2e (T1-T5)...\033[0m"
-	$(BUN) test e2e/temporal-control-plane.test.ts
-
-test-e2e-temporal-up: ## Bring up full e2e stack including Temporal services (2 worker replicas)
-	docker-compose -f .infra/docker-compose.e2e.yaml -p ark-e2e up -d --scale temporal-worker=2
-
-test-e2e-temporal-down: ## Tear down the full e2e stack and volumes
-	docker-compose -f .infra/docker-compose.e2e.yaml -p ark-e2e down -v
-
-docker-build-temporal-worker: ## Build the Temporal worker Docker image for e2e
-	docker build -t ark-temporal-worker:e2e -f .infra/Dockerfile.temporal-worker .
 
 test-web-e2e: build-web ## Run web end-to-end tests (Playwright against the web dashboard)
 	@# `bunx --bun playwright test` runs Playwright under Bun, which is
@@ -233,20 +262,20 @@ test-watch: ## Run unit tests in watch mode
 	$(BUN) test --watch
 
 lint: ## Lint the codebase (ESLint + TypeScript)
-	npx eslint packages/ --max-warnings 0
+	bunx --bun eslint packages/ --max-warnings 0
 
 lint-fix: ## Auto-fix lint issues
-	npx eslint packages/ --fix
+	bunx --bun eslint packages/ --fix
 
 drift: ## Check drizzle schema vs generated migrations (both dialects)
 	$(BUN) x drizzle-kit check --config drizzle.config.ts
 	DRIZZLE_DIALECT=postgres $(BUN) x drizzle-kit check --config drizzle.config.ts
 
 format: ## Format code with Prettier
-	npx prettier --write "packages/**/*.{ts,tsx,js,jsx,json,css}"
+	bunx --bun prettier --write "packages/**/*.{ts,tsx,js,jsx,json,css}"
 
 format-check: ## Check code formatting (CI gate)
-	npx prettier --check "packages/**/*.{ts,tsx,js,jsx,json,css}"
+	bunx --bun prettier --check "packages/**/*.{ts,tsx,js,jsx,json,css}"
 
 docs-cli: ## Generate docs/cli-reference.md from the Commander.js command tree
 	$(BUN) run scripts/generate-cli-docs.ts

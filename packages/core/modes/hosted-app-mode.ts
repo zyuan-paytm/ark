@@ -22,6 +22,7 @@ import { FileSecretsProvider } from "../secrets/file-provider.js";
 import type { SecretsCapability } from "../secrets/types.js";
 import type { ArkConfig } from "../config.js";
 import { buildTenantScope } from "../tenant-scope.js";
+import type { AppContext } from "../app.js";
 
 /**
  * Hosted compute bootstrap is intentionally a no-op. The operator
@@ -52,7 +53,6 @@ function makeHostedTenantScope(): TenantScopeCapability {
   return {
     forTenant: (app, tenantId) => {
       if (app.tenantId === tenantId) return app;
-      // Non-root already-scoped context: build a fresh sub-scope (no cache).
       if (app.tenantId !== null) return buildTenantScope(app, tenantId);
       const existing = cache.get(tenantId);
       if (existing) return existing;

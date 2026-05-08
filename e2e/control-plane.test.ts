@@ -30,7 +30,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, copyFileSync } from "fs";
+import { mkdtempSync, rmSync, mkdirSync, copyFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { up as composeUp, down as composeDown } from "./helpers/docker-stack.js";
@@ -76,6 +76,19 @@ beforeAll(async () => {
       // stack is reused via ARK_E2E_STACK_RUNNING=1.
       if (!String(err?.message ?? "").toLowerCase().includes("exist")) throw err;
     });
+
+  // Phase 2: seed stub agents into the DB. These live in e2e/fixtures/agents/
+  // (not in the repo's agents/ directory) so they don't ship in the production
+  // Docker image. seedBuiltinResources only reads from agents/ at boot, so we
+  // must seed them explicitly here via agent/create.
+  const agentsFixtureDir = join(REPO_ROOT, "e2e", "fixtures", "agents");
+  for (const file of ["stub-planner.yaml", "stub-implementer.yaml"]) {
+    const yaml = readFileSync(join(agentsFixtureDir, file), "utf-8");
+    const name = file.replace(/\.ya?ml$/, "");
+    await rpc.call("agent/create", { name, yaml }).catch((err) => {
+      if (!String(err?.message ?? "").toLowerCase().includes("exist")) throw err;
+    });
+  }
 }, 120_000);
 
 afterAll(async () => {

@@ -8,7 +8,7 @@
  */
 
 import type { AppContext } from "../app.js";
-import type { OutboundMessage } from "../conductor/common/channel-types.js";
+import type { OutboundMessage } from "./channel/channel-types.js";
 import { createWorktreePR } from "./worktree/index.js";
 import { eventBus } from "../hooks.js";
 import { safeAsync } from "../safe.js";

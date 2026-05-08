@@ -30,10 +30,13 @@ import * as m012 from "./012_isolation_kind_rename.js";
 import * as m013 from "./013_eval_session_type.js";
 // Migration 014: standalone workspaces + workspace_repos tables (post code-intel).
 import * as m014 from "./014_workspaces.js";
-// Migration 015: Temporal workflow_id columns + session_projections sidecar tables.
-import * as m015 from "./015_temporal_columns.js";
-// Migration 016: pty_cols / pty_rows columns on sessions (Postgres schema parity).
+// Migration 015: drop legacy `provider` columns from compute + compute_templates;
+// firecracker data fixup. See docs/superpowers/plans/2026-05-05-compute-cleanup.md.
+import * as m015 from "./015_drop_legacy_provider_columns.js";
+// Migration 016: add pty_cols / pty_rows to sessions (postgres schema parity).
 import * as m016 from "./016_pty_cols.js";
+// Migration 017: Temporal workflow_id columns + session_projections sidecar tables.
+import * as m017 from "./017_temporal_columns.js";
 
 export const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: m001.VERSION, name: m001.NAME, up: m001.up },
@@ -56,4 +59,5 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: m014.VERSION, name: m014.NAME, up: m014.up },
   { version: m015.VERSION, name: m015.NAME, up: m015.up },
   { version: m016.VERSION, name: m016.NAME, up: m016.up },
+  { version: m017.VERSION, name: m017.NAME, up: m017.up },
 ];

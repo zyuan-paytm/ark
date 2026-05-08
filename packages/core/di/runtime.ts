@@ -30,14 +30,14 @@ import { CodexTranscriptParser } from "../runtimes/codex/parser.js";
 import { GeminiTranscriptParser } from "../runtimes/gemini/parser.js";
 import { AgentSdkParser } from "../runtimes/claude-agent/parser.js";
 import { createPluginRegistry } from "../plugins/registry.js";
-import { FsSnapshotStore } from "../../compute/core/snapshot-store-fs.js";
+import { FsSnapshotStore } from "../compute/snapshot-store-fs.js";
 import type { SessionRepository } from "../repositories/session.js";
 import { Lifecycle } from "../lifecycle.js";
 import { ServiceWiring } from "../infra/service-wiring.js";
 import { ComputeProvidersBoot } from "../infra/compute-providers-boot.js";
 import { TensorZeroLauncher } from "../infra/tensorzero-launcher.js";
 import { RouterLauncher } from "../infra/router-launcher.js";
-import { ConductorLauncher } from "../infra/conductor-launcher.js";
+import { ServerPollers } from "../infra/server-pollers.js";
 import { ArkdLauncher } from "../infra/arkd-launcher.js";
 import { MetricsPoller } from "../infra/metrics-poller.js";
 import { MaintenancePollers } from "../infra/maintenance-pollers.js";
@@ -134,12 +134,16 @@ export function registerRuntime(container: AppContainer): void {
     // drops in here without rippling through callers.
     snapshotStore: asFunction(
       (c: { config: ArkConfig; mode: import("../modes/app-mode.js").AppMode }) => {
-        // ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE=1 bypasses this for e2e testing only.
-        if (c.mode.kind === "hosted" && !process.env.ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE) {
+        // ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE keeps the laptop dev loop
+        // usable while an S3SnapshotStore is still TODO. NEVER set in
+        // production -- a multi-replica deployment loses snapshot
+        // visibility across pods if this is on.
+        if (c.mode.kind === "hosted" && process.env.ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE !== "1") {
           throw new Error(
             "snapshotStore: hosted mode requires a non-fs snapshot backend " +
               "(FsSnapshotStore is pod-ephemeral and not multi-replica safe). " +
-              "Wire up an S3SnapshotStore implementation before enabling hosted mode.",
+              "Wire up an S3SnapshotStore implementation before enabling hosted mode. " +
+              "For laptop dev, set ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE=1 (NOT for prod).",
           );
         }
         return new FsSnapshotStore(join(c.config.dirs.ark, "snapshots"));
@@ -190,9 +194,9 @@ export function registerRuntime(container: AppContainer): void {
       },
     ),
 
-    conductorLauncher: asFunction(
-      (c: { app: AppContext; config: ArkConfig; bootOptions: AppBootOptions }) =>
-        new ConductorLauncher(c.app, c.config, { skip: c.bootOptions.skipConductor }),
+    serverPollers: asFunction(
+      (c: { app: AppContext; bootOptions: AppBootOptions }) =>
+        new ServerPollers(c.app, { skip: c.bootOptions.skipConductor }),
       {
         lifetime: Lifetime.SINGLETON,
         dispose: (s) => s.stop(),
