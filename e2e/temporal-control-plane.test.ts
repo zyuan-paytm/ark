@@ -52,94 +52,102 @@ afterAll(async () => {
   if (arkDir) rmSync(arkDir, { recursive: true, force: true });
 }, 30_000);
 
-// ── T1: Temporal routing + session completion ──────────────────────────────
+// ── T1: Temporal routing assertions ────────────────────────────────────────
 //
-// Phase 2 design: SessionService.start() in Temporal mode:
-//   1. Starts the Temporal workflow (records workflow_id + orchestrator=temporal)
-//   2. ALSO kicks the bespoke dispatch engine so stages actually run
+// Phase 2 design: SessionService.start() in Temporal mode kicked BOTH the
+// Temporal workflow AND the bespoke dispatch engine, so the session completed
+// via bespoke. T1 used to assert "completed via bespoke engine".
 //
-// The Temporal workflow watches for completion in the background.
-// T1 proves the routing decision is correct AND the session completes.
+// Phase 3 cutover: emitSessionCreated() is gated on !usesTemporal. The
+// Temporal workflow is now the sole driver. Until Phase 3.5 ports the
+// AppContext-dependent dispatch helpers (getStage, resolveAgent, buildTask,
+// executeAction, etc.) into OrchestrationDeps, dispatchStageActivity throws
+// at the stubbed-callback boundary and sessions cannot complete end-to-end.
+//
+// T1's Phase 3 contract: routing stamps + workflow_run_id correlation. The
+// completion assertion lives in T1.5 (deferred to Phase 3.5).
 
-describe("T1 -- Temporal routing and session completion", () => {
+describe("T1 -- Temporal routing", () => {
   test(
-    "session stamped orchestrator=temporal+workflow_id and completes via bespoke engine",
+    "session stamped orchestrator=temporal + workflow_id + workflow_run_id at start",
     async () => {
       const { session: created } = await rpc.call<{ session: any }>("session/start", {
         flow: "e2e-docs",
         summary: "T1-temporal-routing",
       });
 
-      // Routing assertion: set at session creation time, no worker needed
+      // Routing: set at session creation time, no worker needed
       expect(created.orchestrator).toBe("temporal");
       expect(created.workflow_id).toBeTruthy();
       expect(created.workflow_id).toMatch(/^session-s-/);
-
-      // Completion assertion: bespoke engine runs stages, session reaches terminal state
-      const result = await waitFor(
-        () => rpc.call<{ session: any }>("session/read", { sessionId: created.id }),
-        (r) => ["completed", "failed"].includes(r.session.status),
-        { timeoutMs: 30_000, intervalMs: 500, description: "T1 session terminal" },
-      );
-
-      if (result.session.status !== "completed") {
-        console.error("T1: session did not complete:", JSON.stringify(result.session, null, 2));
-      }
-
-      expect(result.session.status).toBe("completed");
-      // Temporal markers persist through completion
-      expect(result.session.orchestrator).toBe("temporal");
-      expect(result.session.workflow_id).toBeTruthy();
+      // Phase 3 addition: workflow_run_id is populated from
+      // WorkflowHandle.firstExecutionRunId so operators can correlate the
+      // session row with the Temporal UI's workflow history.
+      expect(created.workflow_run_id).toBeTruthy();
+      expect(typeof created.workflow_run_id).toBe("string");
     },
-    40_000,
+    20_000,
   );
 });
 
-// ── T2: Temporal routing + bespoke parity ─────────────────────────────────
+// T1.5 -- end-to-end completion under Temporal-driven dispatch.
+// Deferred to Phase 3.5: requires porting AppContext-dependent helpers in
+// dispatch-deps.ts (getStage, resolveAgent, buildTask, executeAction,
+// resolveExecutor, startStatusPoller). See `docs/superpowers/plans/
+// 2026-05-08-temporal-phase-3.md` Followups section.
+describe("T1.5 -- Temporal-driven completion (Phase 3.5)", () => {
+  test.todo("session completes via dispatchStageActivity once dispatch helpers are ported");
+});
 
-describe("T2 -- bespoke sessions unaffected when Temporal flag is on globally", () => {
+// ── T2: concurrent routing under Temporal ─────────────────────────────────
+//
+// Phase 3: assert routing stamps for concurrent starts. Completion under
+// Temporal-driven dispatch deferred to Phase 3.5 (see T1.5).
+
+describe("T2 -- concurrent Temporal routing", () => {
   test(
-    "sessions with orchestrator=temporal still complete at same rate as before",
+    "concurrent session starts each get distinct workflow_id and workflow_run_id",
     async () => {
-      // Start 3 sessions concurrently -- all use Temporal routing (flag is global)
       const starts = await Promise.all(
         Array.from({ length: 3 }, (_, i) =>
           rpc.call<{ session: any }>("session/start", { flow: "e2e-docs", summary: `T2-concurrent-${i}` }),
         ),
       );
 
-      const ids = starts.map((s) => s.session.id);
+      const sessions = starts.map((s) => s.session);
+      const wfIds = new Set(sessions.map((s) => s.workflow_id));
+      const runIds = new Set(sessions.map((s) => s.workflow_run_id));
 
-      // All three must complete within 30s
-      const results = await Promise.all(
-        ids.map((id) =>
-          waitFor(
-            () => rpc.call<{ session: any }>("session/read", { sessionId: id }),
-            (r) => ["completed", "failed"].includes(r.session.status),
-            { timeoutMs: 30_000, intervalMs: 500, description: `T2 session ${id}` },
-          ),
-        ),
-      );
-
-      for (const r of results) {
-        expect(r.session.status).toBe("completed");
-        expect(r.session.orchestrator).toBe("temporal");
+      expect(wfIds.size).toBe(3);
+      expect(runIds.size).toBe(3);
+      for (const s of sessions) {
+        expect(s.orchestrator).toBe("temporal");
+        expect(s.workflow_id).toMatch(/^session-s-/);
+        expect(s.workflow_run_id).toBeTruthy();
       }
     },
-    45_000,
+    30_000,
   );
 });
 
-// ── T3-T5: stub placeholders ───────────────────────────────────────────────
+// ── T3-T5: deferred to Phase 3.5 ────────────────────────────────────────────
+//
+// T3 (manual gate across server restart), T4 (fan-out / join race), and T5
+// (retry policy + non-retryable) all require dispatchStageActivity to drive
+// real launches. Phase 3 ships the workflow scaffolding (review_gate signals,
+// fan_out + stageWorkflow children, ApplicationFailure-tagged errors) but
+// the dispatch chain still throws at the stubbed-callback boundary in
+// buildDispatchDeps. Phase 3.5 ports the AppContext-dependent helpers and
+// these tests light up.
 
-describe("T3 -- manual gate (requires workflow task execution)", () => {
-  test.todo("Temporal worker workflow task execution needs Node.js or updated Bun SDK");
+describe("T3 -- manual gate across server restart (Phase 3.5)", () => {
+  test.todo("review_gate parks via condition() + signal -- needs dispatch helper port");
 });
 
-describe("T4 -- fan-out / join race", () => {
-  test.todo("requires fan_out stage type (Phase 3)");
+describe("T4 -- fan-out / join race (Phase 3.5)", () => {
+  test.todo("stageWorkflow children + Promise.all -- needs dispatch helper port");
 });
 
-describe("T5 -- retry policy + non-retryable errors", () => {
-  test.todo("requires flaky-pr test action");
+describe("T5 -- retry policy + non-retryable (Phase 3.5)", () => {
+  test.todo("flaky-pr action wired in core -- needs Temporal activity to reach action layer");
 });

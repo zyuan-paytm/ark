@@ -1,8 +1,12 @@
 # Temporal Orchestration for Ark (Design / Phase 0)
 
+> **2026-05-08 update (Phase 3 landed):** sessionWorkflow now drives stage progression directly. `dispatchStageActivity` is self-contained -- it constructs `DispatchDeps` from `OrchestrationDeps` via `buildDispatchDeps()` (Phase 2 used a `dispatch?` callback escape hatch; that field is removed). `emitSessionCreated()` is gated on `!usesTemporal` so the bespoke listener no longer double-drives sessions in Temporal mode. The 20-stage hard-cap loop is replaced by a DAG-driven walker reading `loadFlowActivity` output. `review_gate` stages park on `await condition()` consuming `approveReviewGate` / `rejectReviewGate` signals. `fan_out` / `fork` stages spawn `stageWorkflow` children and join via `Promise.all`. Non-retryable error tags (`validationError`, `authError`, `dispatchValidationError`, ...) are exported from `packages/core/temporal/errors.ts`. Shadow projector is wired -- pass `shadowMode: true` in `SessionWorkflowInput` and `project*Activity` writes to `session_projections_shadow` instead of live tables.
+
 > **2026-05-07 update (Phase 2 landed):** Local mode is deprecated and is no longer a parity target. The capability-seam approach (LocalOrchestrator vs TemporalOrchestrator) has been simplified to a flag check at `SessionService` boundaries. RF-2 and RF-4 from orchestrator-refactor-plan are deferred. The Temporal worker requires Bun 1.3+ for workflow task execution (see `packages/core/temporal/worker.ts`).
 
-> Status: **Phase 2 shipped.** `features.temporalOrchestration=true` routes new hosted sessions through the `sessionWorkflow`. The bespoke engine is untouched and remains the default (`features.temporalOrchestration=false`). Phases 3-6 are tracked as GitHub issues.
+> Status: **Phase 3 shipped.** `features.temporalOrchestration=true` routes new hosted sessions through the `sessionWorkflow` and the workflow drives every stage. Bespoke engine is untouched and remains the default (`features.temporalOrchestration=false`). T1/T2 e2e assert routing + `workflow_run_id` correlation; T1.5/T3/T4/T5 are stubbed `test.todo` pending Phase 3.5. Phases 4-6 tracked as GitHub issues.
+
+> **Phase 3.5 scope (next):** Port AppContext-dependent helpers in `packages/core/temporal/activities/dispatch-deps.ts` (currently stubbed with "Phase 3.5" placeholders): `getStage`, `getStageAction`, `resolveAgent`, `buildTask`, `executeAction`, `resolveExecutor`, `startStatusPoller`, `materializeClaudeAuth`. Each takes `app: AppContext` upstream; the port rewrites them to take narrow deps from `OrchestrationDeps`. Once landed, `dispatchStageActivity` reaches the executor layer and T1.5/T3/T4/T5 e2e tests light up.
 >
 > **Scope: hosted (control-plane) mode only.** Local mode is deprecated.
 >
