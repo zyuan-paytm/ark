@@ -102,7 +102,7 @@ export class SessionService {
       const { getTemporalClient } = await import("../temporal/client.js");
       const client = await getTemporalClient(app.config.temporal);
       const wfId = `session-${session.id}`;
-      await client.workflow.start("sessionWorkflow", {
+      const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue: `ark.${app.tenantId ?? "default"}.stages`,
         workflowId: wfId,
         args: [
@@ -113,7 +113,10 @@ export class SessionService {
           },
         ],
       });
-      await this.sessions.update(session.id, { workflow_id: wfId } as Partial<Session>);
+      await this.sessions.update(session.id, {
+        workflow_id: wfId,
+        workflow_run_id: handle.firstExecutionRunId,
+      } as Partial<Session>);
     }
     // Kick the bespoke dispatch engine so stages run -- in Temporal mode the
     // workflow watches completion in the background while bespoke handles

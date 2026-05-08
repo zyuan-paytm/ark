@@ -34,3 +34,8 @@ test("SessionService.start() leaves workflow_id null when temporal flag is off",
   const session = await app.sessionService.start({ summary: "routing-test-wfid" });
   expect(session.workflow_id).toBeNull();
 });
+
+test("SessionService.start() leaves workflow_run_id null when temporal flag is off", async () => {
+  const session = await app.sessionService.start({ summary: "routing-test-run-id" });
+  expect(session.workflow_run_id).toBeNull();
+});

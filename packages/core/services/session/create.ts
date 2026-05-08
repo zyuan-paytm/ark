@@ -237,8 +237,11 @@ export class SessionCreator {
     // an already-advanced session when it first queries.
     if (usesTemporal && d.startTemporalWorkflow) {
       const tenantId = d.sessions.getTenant?.() ?? "default";
-      const wfId = await d.startTemporalWorkflow(session.id, flowName, tenantId);
-      await d.sessions.update(session.id, { workflow_id: wfId } as Partial<Session>);
+      const { workflowId, runId } = await d.startTemporalWorkflow(session.id, flowName, tenantId);
+      await d.sessions.update(session.id, {
+        workflow_id: workflowId,
+        workflow_run_id: runId,
+      } as Partial<Session>);
     }
 
     hooks?.onCreated?.(session.id);

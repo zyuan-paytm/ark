@@ -156,12 +156,12 @@ export function registerServices(
                   const { getTemporalClient } = await import("../temporal/client.js");
                   const client = await getTemporalClient(c.config.temporal);
                   const wfId = `session-${sessionId}`;
-                  await client.workflow.start("sessionWorkflow", {
+                  const handle = await client.workflow.start("sessionWorkflow", {
                     taskQueue: `ark.${tenantId}.stages`,
                     workflowId: wfId,
                     args: [{ sessionId, tenantId, flowName }],
                   });
-                  return wfId;
+                  return { workflowId: wfId, runId: handle.firstExecutionRunId };
                 }
               : undefined,
         }),
