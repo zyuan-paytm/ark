@@ -85,7 +85,7 @@ services:
       temporal-postgres:
         condition: service_healthy
     environment:
-      DB: postgresql
+      DB: postgres12
       DB_PORT: 5432
       POSTGRES_USER: temporal
       POSTGRES_PWD: temporal
@@ -93,10 +93,11 @@ services:
     ports:
       - "7234:7233"
     healthcheck:
-      test: ["CMD", "temporal", "workflow", "list", "--namespace", "default", "--address", "localhost:7233"]
+      test: ["CMD-SHELL", "temporal workflow list --namespace default --address $$(hostname -i):7233"]
       interval: 5s
-      timeout: 5s
-      retries: 30
+      timeout: 10s
+      retries: 60
+      start_period: 30s
 
   temporal-ui:
     image: temporalio/ui:2.31.2
@@ -129,6 +130,11 @@ services:
       ARK_TEMPORAL_ORCHESTRATION: "true"
       ARK_PROFILE: control-plane
       ARK_LOG_LEVEL: warn
+      ARK_BLOB_BACKEND: local
+      ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE: "1"
+      ARK_SECRETS_BACKEND: file
+      ARK_AUTH_REQUIRE_TOKEN: "false"
+      ARK_DEFAULT_TENANT: default
 
 volumes:
   ark-e2e-postgres-data:

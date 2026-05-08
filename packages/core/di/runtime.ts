@@ -134,7 +134,8 @@ export function registerRuntime(container: AppContainer): void {
     // drops in here without rippling through callers.
     snapshotStore: asFunction(
       (c: { config: ArkConfig; mode: import("../modes/app-mode.js").AppMode }) => {
-        if (c.mode.kind === "hosted") {
+        // ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE=1 bypasses this for e2e testing only.
+        if (c.mode.kind === "hosted" && !process.env.ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE) {
           throw new Error(
             "snapshotStore: hosted mode requires a non-fs snapshot backend " +
               "(FsSnapshotStore is pod-ephemeral and not multi-replica safe). " +

@@ -46,7 +46,8 @@ export function registerStorage(container: AppContainer): void {
         }
         // Hosted mode rejects the local fallback: the conductor pod's
         // ephemeral disk is not a valid place for tenant blobs.
-        if (c.mode.kind === "hosted") {
+        // ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE=1 bypasses this for e2e testing only.
+        if (c.mode.kind === "hosted" && !process.env.ARK_DEV_ALLOW_LOCAL_HOSTED_STORAGE) {
           throw new Error(
             "storage.blobBackend must be 's3' in hosted mode -- LocalDiskBlobStore is " +
               "pod-ephemeral and not tenant-isolated. Set storage.blobBackend=s3 + " +
