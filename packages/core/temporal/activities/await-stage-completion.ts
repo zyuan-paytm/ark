@@ -23,12 +23,19 @@ export async function awaitStageCompletionActivity(input: {
   const d = deps();
   const deadline = Date.now() + (input.timeoutMs ?? 3_600_000);
 
+  const POLL_MS = 500;
+  const HEARTBEAT_EVERY = 20; // heartbeat every 20 polls (~10s)
+  let pollCount = 0;
+
   while (Date.now() < deadline) {
-    Context.current().heartbeat(`waiting-stage-${input.stageIdx}`);
+    if (pollCount % HEARTBEAT_EVERY === 0) {
+      Context.current().heartbeat(`waiting-stage-${input.stageIdx}`);
+    }
+    pollCount++;
 
     const session = await d.sessions.get(input.sessionId);
     if (!session) {
-      await Bun.sleep(2000);
+      await Bun.sleep(POLL_MS);
       continue;
     }
 
@@ -40,7 +47,7 @@ export async function awaitStageCompletionActivity(input: {
       return { status: mapped };
     }
 
-    await Bun.sleep(5000);
+    await Bun.sleep(POLL_MS);
   }
 
   return { status: "failed", error: "awaitStageCompletion timed out" };

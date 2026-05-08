@@ -53,6 +53,12 @@ export interface SpawnOptions {
   envFile: string;
   /** ms to wait for /api/health before giving up. */
   startupTimeoutMs?: number;
+  /**
+   * Additional env vars applied on top of the parsed envFile. Useful for
+   * overriding individual keys (ports, feature flags) when running multiple
+   * server instances in the same test suite.
+   */
+  extraEnv?: Record<string, string>;
 }
 
 function parseEnvFile(path: string): Record<string, string> {
@@ -72,17 +78,20 @@ function parseEnvFile(path: string): Record<string, string> {
 
 export async function spawnServer(opts: SpawnOptions): Promise<ServerHandle> {
   const fileEnv = parseEnvFile(opts.envFile);
-  const env: Record<string, string> = { ...process.env, ...fileEnv, ARK_DIR: opts.arkDir } as Record<string, string>;
+  // extraEnv overrides fileEnv on a per-key basis -- useful for running
+  // two server instances side-by-side with different ports or feature flags.
+  const mergedEnv = { ...fileEnv, ...(opts.extraEnv ?? {}) };
+  const env: Record<string, string> = { ...process.env, ...mergedEnv, ARK_DIR: opts.arkDir } as Record<string, string>;
   const repoRoot = resolve(import.meta.dir, "../..");
 
   // Free any ports left bound by a prior test run that crashed before
   // tearing down the server. Without this, EADDRINUSE on bind() kills
   // boot before /api/health is reachable.
   const portsToClear = [
-    fileEnv.ARK_WEB_PORT,
-    fileEnv.ARK_CONDUCTOR_PORT,
-    fileEnv.ARK_ARKD_PORT,
-    fileEnv.ARK_SERVER_PORT,
+    mergedEnv.ARK_WEB_PORT,
+    mergedEnv.ARK_CONDUCTOR_PORT,
+    mergedEnv.ARK_ARKD_PORT,
+    mergedEnv.ARK_SERVER_PORT,
   ]
     .filter((p): p is string => typeof p === "string" && p.length > 0)
     .map((p) => Number(p))
@@ -96,7 +105,7 @@ export async function spawnServer(opts: SpawnOptions): Promise<ServerHandle> {
     stderr: "inherit",
   });
 
-  const webPort = fileEnv.ARK_WEB_PORT ?? "8422";
+  const webPort = mergedEnv.ARK_WEB_PORT ?? "8422";
   const webUrl = `http://localhost:${webPort}`;
 
   const deadline = Date.now() + (opts.startupTimeoutMs ?? 30_000);
