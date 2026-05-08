@@ -1,5 +1,8 @@
 import type { DispatchStageResult } from "../types.js";
 import type { OrchestrationDeps } from "../../services/deps.js";
+import { buildDispatchDeps } from "./dispatch-deps.js";
+import { DispatchService } from "../../services/dispatch/index.js";
+import { dispatchValidationError } from "../errors.js";
 
 let _deps: OrchestrationDeps | null = null;
 export function injectDeps(deps: OrchestrationDeps): void {
@@ -13,10 +16,9 @@ function deps(): OrchestrationDeps {
 /**
  * Dispatch the current stage of a session: resolve agent, build task, launch executor.
  *
- * Delegates to the bespoke DispatchService via the optional `dispatch` callback
- * wired at worker bootstrap time through depsFromApp. Phase 3 will replace this
- * with a self-contained activity that constructs its own DispatchDeps from
- * OrchestrationDeps so no AppContext back-reference is needed.
+ * Phase 3: self-contained activity. Constructs its own DispatchDeps from the
+ * injected OrchestrationDeps via buildDispatchDeps -- no AppContext back-reference
+ * and no optional dispatch callback required.
  */
 export async function dispatchStageActivity(input: {
   sessionId: string;
@@ -24,21 +26,25 @@ export async function dispatchStageActivity(input: {
 }): Promise<DispatchStageResult> {
   const d = deps();
 
-  if (!d.dispatch) {
-    // Emit dispatch_failed so the session surfaces the issue rather than hanging.
-    await d.events.log(input.sessionId, "dispatch_failed", {
-      actor: "system",
-      data: {
-        reason: "dispatchStageActivity: dispatch callback not wired on OrchestrationDeps",
-        stageIdx: input.stageIdx,
-      },
-    });
-    return {};
-  }
+  const dispatchDeps = buildDispatchDeps(d);
+  const svc = new DispatchService(dispatchDeps);
 
-  const result = await d.dispatch(input.sessionId);
-  return {
-    launchPid: (result as any)?.pid ?? undefined,
-    launchId: (result as any)?.handle ?? undefined,
-  };
+  try {
+    const result = await svc.dispatch(input.sessionId);
+
+    if (result.ok === false) {
+      throw dispatchValidationError(result.message);
+    }
+
+    return {
+      launchPid: (result as any)?.pid ?? undefined,
+      launchId: (result as any)?.handle ?? undefined,
+    };
+  } catch (e: any) {
+    const msg: string = e?.message ?? String(e);
+    if (/validation|not found|not ready/i.test(msg)) {
+      throw dispatchValidationError(msg);
+    }
+    throw e;
+  }
 }
