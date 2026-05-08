@@ -1,6 +1,15 @@
-import { proxyActivities, defineSignal, setHandler, workflowInfo } from "@temporalio/workflow";
+import {
+  proxyActivities,
+  defineSignal,
+  setHandler,
+  condition,
+  workflowInfo,
+  startChild,
+} from "@temporalio/workflow";
 import type * as acts from "../activities/index.js";
 import type { SessionWorkflowInput } from "../types.js";
+import { stageWorkflow } from "./stage-workflow.js";
+import { classifyStage } from "../dag-helpers.js";
 
 const {
   startSessionActivity,
@@ -12,6 +21,7 @@ const {
   runVerificationActivity: _runVerificationActivity,
   projectSessionActivity,
   projectStageActivity,
+  loadFlowActivity,
 } = proxyActivities<typeof acts>({
   startToCloseTimeout: "1 hour",
   heartbeatTimeout: "60 seconds",
@@ -22,14 +32,14 @@ export const approveReviewGateSignal = defineSignal<[{ sessionId: string }]>("ap
 export const rejectReviewGateSignal = defineSignal<[{ sessionId: string; reason: string }]>("rejectReviewGate");
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
-  let _reviewApproved = false;
-  let _reviewRejected = false;
+  let approved = false;
+  let rejected: string | null = null;
 
   setHandler(approveReviewGateSignal, () => {
-    _reviewApproved = true;
+    approved = true;
   });
-  setHandler(rejectReviewGateSignal, () => {
-    _reviewRejected = true;
+  setHandler(rejectReviewGateSignal, (p) => {
+    rejected = p.reason;
   });
 
   const seq = () => workflowInfo().historyLength;
@@ -37,15 +47,91 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   await startSessionActivity(input);
   await projectSessionActivity({ sessionId: input.sessionId, seq: seq(), patch: { status: "ready" } });
 
-  // Iterate up to 20 stages. Each iteration:
-  // 1. Resolve compute
-  // 2. Provision (heartbeating, long-running)
-  // 3. Dispatch the stage
-  // 4. Await completion (heartbeating, long-running)
-  // 5. Project result
-  // 6. If stage failed/stopped, break
-  // 7. If session is now terminal (all stages done), break
-  for (let stageIdx = 0; stageIdx < 20; stageIdx++) {
+  const flow = await loadFlowActivity({ flowName: input.flowName });
+
+  for (const stageIdx of flow.topoOrder) {
+    const stage = flow.stages[stageIdx];
+    const kind = classifyStage(stage);
+
+    // Review gate: park on signal -- durable across worker / server restart.
+    if (kind === "review_gate") {
+      await projectStageActivity({
+        sessionId: input.sessionId,
+        stageIdx,
+        seq: seq(),
+        patch: { status: "awaiting_review" },
+      });
+      await condition(() => approved || rejected !== null);
+      if (rejected !== null) {
+        await projectStageActivity({
+          sessionId: input.sessionId,
+          stageIdx,
+          seq: seq(),
+          patch: { status: "rejected", error: rejected },
+        });
+        await projectSessionActivity({
+          sessionId: input.sessionId,
+          seq: seq(),
+          patch: { status: "failed", error: rejected },
+        });
+        return;
+      }
+      approved = false; // reset for next gate
+      await projectStageActivity({
+        sessionId: input.sessionId,
+        stageIdx,
+        seq: seq(),
+        patch: { status: "completed" },
+      });
+      continue;
+    }
+
+    // Fan-out: spawn child stageWorkflow instances in parallel, join via Promise.all.
+    if (kind === "fan_out") {
+      const subtasks: any[] = (stage as any).subtasks ?? [];
+      await projectStageActivity({
+        sessionId: input.sessionId,
+        stageIdx,
+        seq: seq(),
+        patch: { status: "fanning_out" },
+      });
+      const childPromises = subtasks.map((sub: any, j: number) =>
+        startChild(stageWorkflow, {
+          workflowId: `${input.sessionId}-${stage.name}-${j}`,
+          taskQueue: workflowInfo().taskQueue,
+          args: [
+            {
+              parentSessionId: input.sessionId,
+              childSessionId: sub.sessionId ?? `${input.sessionId}-${stage.name}-${j}`,
+              tenantId: input.tenantId,
+              stageIdx,
+              stageName: stage.name,
+              task: sub.task ?? "",
+              agent: sub.agent,
+            },
+          ],
+        }).then((handle) => handle.result()),
+      );
+      const results = await Promise.all(childPromises);
+      const failed = results.find((r) => r.status !== "completed");
+      await projectStageActivity({
+        sessionId: input.sessionId,
+        stageIdx,
+        seq: seq(),
+        patch: { status: failed ? "failed" : "completed" },
+      });
+      if (failed) {
+        await projectSessionActivity({
+          sessionId: input.sessionId,
+          seq: seq(),
+          patch: { status: "failed" },
+        });
+        return;
+      }
+      continue;
+    }
+
+    // Linear/DAG stage: dispatch + await completion.
     await resolveComputeForStageActivity({ sessionId: input.sessionId, stageIdx });
     await provisionComputeActivity({ sessionId: input.sessionId, computeName: "local" });
     await projectStageActivity({
@@ -75,8 +161,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       patch: { status: result.status },
     });
 
-    if (result.status !== "completed") break;
-    if (result.outcome === "session_complete") break;
+    if (result.status !== "completed") {
+      await projectSessionActivity({
+        sessionId: input.sessionId,
+        seq: seq(),
+        patch: { status: result.status },
+      });
+      return;
+    }
   }
 
   await projectSessionActivity({

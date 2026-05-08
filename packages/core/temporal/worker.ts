@@ -44,7 +44,7 @@ async function main() {
       connection,
       namespace: config.temporal.namespace,
       taskQueue,
-      workflowsPath: new URL("./workflows/session-workflow.ts", import.meta.url).pathname,
+      workflowsPath: new URL("./workflows/", import.meta.url).pathname,
       activities,
     });
     await worker.run();
