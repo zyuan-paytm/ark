@@ -32,6 +32,14 @@ export async function dispatchStageActivity(input: {
   // dispatches the same first stage and never advances. The bespoke engine's
   // StageAdvanceService keeps these in sync; under Temporal the workflow
   // tracks stageIdx and is responsible for projecting it onto the row.
+  //
+  // Retry-recovery: when a prior attempt failed (action raised, the bespoke
+  // path in `maybeHandleActionStage` wrote status="failed" directly to the
+  // session row), Temporal silently retries the activity. Without resetting
+  // the row here, the retry can succeed but `awaitStageCompletionActivity`
+  // still reads the stale "failed" status and the workflow gives up. Clearing
+  // the failed flag at the top of every dispatch attempt makes the activity
+  // idempotent w.r.t. retry state.
   const session = await d.sessions.get(input.sessionId);
   if (session) {
     const flow = d.flows.get(session.flow);
@@ -42,6 +50,8 @@ export async function dispatchStageActivity(input: {
     const targetStage = flowDef?.stages?.[input.stageIdx]?.name;
     if (targetStage && session.stage !== targetStage) {
       await d.sessions.update(input.sessionId, { stage: targetStage, status: "ready", error: null });
+    } else if (session.status === "failed") {
+      await d.sessions.update(input.sessionId, { status: "ready", error: null });
     }
   }
 

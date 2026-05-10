@@ -208,10 +208,22 @@ export async function handleHookStatus(
   }
 
   if (result.shouldAdvance) {
-    await app.sessionHooks.mediateStageHandoff(sessionId, {
-      autoDispatch: result.shouldAutoDispatch,
-      source: "hook_status",
-    });
+    // See report-pipeline.ts / hook-status.ts: under Temporal orchestration
+    // the session-workflow loop drives stage advancement. Running the bespoke
+    // handoff here races the workflow's dispatchStageActivity and double-runs
+    // action stages.
+    const sessionForOrch = await app.sessions.get(sessionId);
+    if (sessionForOrch?.orchestrator === "temporal") {
+      logDebug(
+        "conductor",
+        `hook_status(signals): skipping bespoke handoff for ${sessionId} -- Temporal workflow drives advancement`,
+      );
+    } else {
+      await app.sessionHooks.mediateStageHandoff(sessionId, {
+        autoDispatch: result.shouldAutoDispatch,
+        source: "hook_status",
+      });
+    }
   }
 
   if (result.newStatus) {
@@ -258,26 +270,27 @@ export async function handleReport(app: AppContext, sessionId: string, report: O
         "conductor",
         `channel_report: skipping bespoke handoff for ${sessionId} -- Temporal workflow drives advancement`,
       );
-    } else try {
-      const handoff = await app.sessionHooks.mediateStageHandoff(sessionId, {
-        autoDispatch: result.shouldAutoDispatch,
-        source: "channel_report",
-        outcome: result.outcome,
-      });
-      if (!handoff.ok && !handoff.blockedByVerification) {
-        logWarn("conductor", `stage handoff failed for ${sessionId}: ${handoff.message}`);
+    } else
+      try {
+        const handoff = await app.sessionHooks.mediateStageHandoff(sessionId, {
+          autoDispatch: result.shouldAutoDispatch,
+          source: "channel_report",
+          outcome: result.outcome,
+        });
+        if (!handoff.ok && !handoff.blockedByVerification) {
+          logWarn("conductor", `stage handoff failed for ${sessionId}: ${handoff.message}`);
+        }
+        if (handoff.blockedByVerification) {
+          const s = await app.sessions.get(sessionId);
+          await sendOSNotification(
+            "Ark: Verification failed",
+            `${s?.summary ?? sessionId} - ${handoff.message.slice(0, 100)}`,
+          );
+          return;
+        }
+      } catch (handoffErr: any) {
+        logError("conductor", `mediateStageHandoff failed for ${sessionId}: ${handoffErr?.message ?? handoffErr}`);
       }
-      if (handoff.blockedByVerification) {
-        const s = await app.sessions.get(sessionId);
-        await sendOSNotification(
-          "Ark: Verification failed",
-          `${s?.summary ?? sessionId} - ${handoff.message.slice(0, 100)}`,
-        );
-        return;
-      }
-    } catch (handoffErr: any) {
-      logError("conductor", `mediateStageHandoff failed for ${sessionId}: ${handoffErr?.message ?? handoffErr}`);
-    }
   }
 
   if (result.shouldRetry) {
