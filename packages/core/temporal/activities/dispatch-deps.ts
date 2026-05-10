@@ -56,6 +56,11 @@ function buildAppShim(d: OrchestrationDeps): AppContext {
     arkDir: d.arkDir,
     tenantId: d.tenantId,
     db: d.db,
+    // SecretsManager is read by buildLaunchEnv → placeAllSecrets via
+    // `app.secrets.list/listBlobsDetailed/resolveMany/getBlob`. Expose it at
+    // the top level (not just on mode) so the shim matches the AppContext
+    // surface those helpers expect.
+    secrets: d.secrets,
     mode: { kind: "hosted", secrets: d.secrets },
   } as unknown as AppContext;
 }
@@ -183,9 +188,18 @@ export function buildDispatchDeps(orchDeps: OrchestrationDeps): TemporalDispatch
       }),
     resolveExecutor: (runtime) => orchDeps.pluginRegistry.executor(runtime) ?? getExecutor(runtime),
 
-    // materializeClaudeAuth: only used for claude-code runtime. stub-runner /
-    // Temporal e2e path doesn't hit it. Phase 3.5+ port reads secrets directly.
-    materializeClaudeAuth: (_session, _compute) => notPortedYet("materializeClaudeAuth"),
+    // materializeClaudeAuth: buildLaunchEnv calls this unconditionally before
+    // branching on runtime, so even stub-runner stages walk through it. The
+    // production helper (materializeClaudeAuthForDispatch) returns EMPTY for
+    // tenants with no claude binding, which is the default for the Temporal
+    // e2e fixtures. We mirror that: no binding lookup yet (tenantClaudeAuth
+    // isn't on OrchestrationDeps), return EMPTY. Phase 3.5+ will port the
+    // real lookup once OrchestrationDeps carries the binding store.
+    materializeClaudeAuth: async () => ({
+      env: {},
+      credsSecretName: null,
+      credsSecretNamespace: null,
+    }),
 
     // ── Lifecycle / follow-on ─────────────────────────────────────────────────
     checkpoint: (sessionId) => {
@@ -194,10 +208,11 @@ export function buildDispatchDeps(orchDeps: OrchestrationDeps): TemporalDispatch
     startStatusPoller: (sessionId, tmuxName, runtime) =>
       startStatusPoller(buildAppShim(orchDeps), sessionId, tmuxName, runtime),
 
-    // mediateStageHandoff, dispatchChild, fork: still stubbed.
-    // Each goes through SessionService/StageAdvanceService/DispatchService
-    // which carry their own AppContext-bound state. Porting is Phase 3.5+.
-    mediateStageHandoff: (_sessionId, _opts) => notPortedYet("mediateStageHandoff"),
+    // mediateStageHandoff is a no-op under Temporal. In bespoke mode it
+    // advances the next stage via StageAdvanceService; under Temporal the
+    // session-workflow loop drives stage advancement itself, so a stage's
+    // post-action handoff has nothing to do.
+    mediateStageHandoff: async (_sessionId, _opts) => undefined,
     executeAction: (sessionId, action) => executeAction(buildAppShim(orchDeps), sessionId, action),
     dispatchChild: (_childId) => notPortedYet("dispatchChild"),
     fork: (_parentId, _task, _opts) => notPortedYet("fork"),

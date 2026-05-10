@@ -40,16 +40,28 @@ esac
 # to mimic the real agent doing some work.
 sleep 1
 
-# Post a CompletionReport to the conductor's channel endpoint.
-curl -fsS -X POST "${CONDUCTOR_URL}/api/channel/${SESSION_ID}" \
+# Post a CompletionReport to the conductor via JSON-RPC `channel/deliver`.
+# The legacy REST route POST /api/channel/:sessionId was removed when the
+# control plane consolidated on the JSON-RPC surface; agents now go through
+# arkd which forwards via the same RPC, but this stub bypasses arkd so we
+# call /api/rpc directly.
+curl -fsS -X POST "${CONDUCTOR_URL}/api/rpc" \
   -H 'Content-Type: application/json' \
   -d "{
-    \"type\": \"completed\",
-    \"sessionId\": \"${SESSION_ID}\",
-    \"stage\": \"${STAGE}\",
-    \"summary\": \"${SUMMARY}\",
-    \"filesChanged\": ${FILES},
-    \"commits\": []
+    \"jsonrpc\": \"2.0\",
+    \"id\": \"stub-agent-${SESSION_ID}-${STAGE}\",
+    \"method\": \"channel/deliver\",
+    \"params\": {
+      \"sessionId\": \"${SESSION_ID}\",
+      \"report\": {
+        \"type\": \"completed\",
+        \"sessionId\": \"${SESSION_ID}\",
+        \"stage\": \"${STAGE}\",
+        \"summary\": \"${SUMMARY}\",
+        \"filesChanged\": ${FILES},
+        \"commits\": []
+      }
+    }
   }"
 
 exit 0

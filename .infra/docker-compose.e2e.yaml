@@ -135,6 +135,13 @@ services:
       ARK_SECRETS_BACKEND: file
       ARK_AUTH_REQUIRE_TOKEN: "false"
       ARK_DEFAULT_TENANT: default
+      # The stub-runner executor spawns child processes that report stage
+      # completion via JSON-RPC channel/deliver to the conductor. In hosted
+      # mode the conductor is merged into the web server, so the agent
+      # callback URL is the web port (ARK_WEB_PORT in .env.e2e = 8422).
+      # host.docker.internal reaches the test process on the docker host
+      # (Mac/Windows), and via the gateway on Linux.
+      ARK_CONDUCTOR_URL: "http://host.docker.internal:8422"
 
 volumes:
   ark-e2e-postgres-data:

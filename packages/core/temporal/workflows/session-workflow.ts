@@ -25,7 +25,10 @@ const {
 } = proxyActivities<typeof acts>({
   startToCloseTimeout: "1 hour",
   heartbeatTimeout: "60 seconds",
-  retry: { maximumAttempts: 3, initialInterval: "1s", backoffCoefficient: 2 },
+  // maximumAttempts: 4 = initial + 3 retries. T5a's flaky_pr fixture fails 3x
+  // before succeeding, so the activity must be allowed at least 4 invocations
+  // for the retry path to actually exercise success-after-N-failures.
+  retry: { maximumAttempts: 4, initialInterval: "1s", backoffCoefficient: 2 },
 });
 
 export const approveReviewGateSignal = defineSignal<[{ sessionId: string }]>("approveReviewGate");

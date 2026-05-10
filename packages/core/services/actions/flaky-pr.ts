@@ -59,7 +59,15 @@ export const flakyPrAction: ActionHandler = {
   name: "flaky_pr",
   aliases: ["flaky-pr"],
   async execute(app, session, action, _opts) {
-    const cfg = (session as any).config ?? {};
+    // Stage config lives on the flow's stage definition, not on session.config.
+    // Look it up from the flow definition for the session's current stage.
+    // Falls back to session.config so tests / callers that pre-populate the
+    // session config still work.
+    const flowDef = await app.flows.get(session.flow);
+    const stageDef = flowDef?.stages?.find((s: { name: string }) => s.name === session.stage) as
+      | { config?: Record<string, unknown> }
+      | undefined;
+    const cfg = (stageDef?.config ?? (session as any).config ?? {}) as Record<string, unknown>;
     const failTimes: number = typeof cfg.fail_times === "number" ? cfg.fail_times : 0;
     const errorMsg: string = typeof cfg.error === "string" ? cfg.error : "Error";
 

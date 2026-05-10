@@ -9,9 +9,10 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, copyFileSync } from "fs";
+import { mkdtempSync, rmSync, mkdirSync, copyFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import YAML from "yaml";
 import { up as composeUp, down as composeDown } from "./helpers/docker-stack.js";
 import { spawnServer, killServer, type ServerHandle } from "./helpers/server-process.js";
 import { RpcClient, waitFor } from "./helpers/rpc-client.js";
@@ -52,6 +53,10 @@ beforeAll(async () => {
       ARK_TEMPORAL_ORCHESTRATION: "true",
       ARK_TEMPORAL_SERVER_URL: "localhost:7234",
       ARK_TEMPORAL_NAMESPACE: "default",
+      // Bind the conductor on 0.0.0.0 so the dockerised Temporal worker can
+      // reach it via host.docker.internal:19102 to deliver stub-agent
+      // completion reports. Default is loopback-only.
+      ARK_CONDUCTOR_HOSTNAME: "0.0.0.0",
     },
   });
   rpc = new RpcClient(server.webUrl);
@@ -84,6 +89,39 @@ afterEach(async () => {
 /** Helper: register a session for afterEach cleanup. */
 function trackSession(session: { id: string }): void {
   createdSessionIds.push(session.id);
+}
+
+/**
+ * Ingest a fixture flow YAML into the hosted DB via the `flow/create` RPC.
+ *
+ * In hosted mode the FlowStore is DB-backed (DbResourceStore); copying YAML
+ * into `arkDir/flows` is a no-op because that directory is only consulted
+ * by the local-mode FileFlowStore. The Temporal worker reads the same DB
+ * over the docker network, so a single `flow/create` call makes the flow
+ * visible to both the server and the worker.
+ *
+ * Idempotent: `flow/create` rejects an existing non-builtin flow, so the
+ * 409-equivalent error is swallowed -- repeated test runs reuse what's
+ * already there.
+ */
+async function ingestFixtureFlow(name: string): Promise<void> {
+  const yamlPath = join(REPO_ROOT, "e2e", "fixtures", "flows", `${name}.yaml`);
+  const parsed = YAML.parse(readFileSync(yamlPath, "utf-8")) as {
+    name: string;
+    description?: string;
+    stages: any[];
+  };
+  try {
+    await rpc.call("flow/create", {
+      name: parsed.name,
+      description: parsed.description,
+      stages: parsed.stages,
+      scope: "global",
+    });
+  } catch (err) {
+    const msg = String((err as Error).message ?? err);
+    if (!/already exists/i.test(msg)) throw err;
+  }
 }
 
 // ── T1: Temporal routing assertions ────────────────────────────────────────
@@ -185,12 +223,8 @@ describe("T3 -- manual gate across server restart", () => {
   test(
     "review_gate parks, survives server restart, resumes on approve",
     async () => {
-      // 1. Copy e2e-review.yaml into arkDir/flows so the server can load it.
-      mkdirSync(join(arkDir, "flows"), { recursive: true });
-      copyFileSync(
-        join(REPO_ROOT, "e2e", "fixtures", "flows", "e2e-review.yaml"),
-        join(arkDir, "flows", "e2e-review.yaml"),
-      );
+      // 1. Ingest e2e-review into the hosted DB so the worker can resolve it.
+      await ingestFixtureFlow("e2e-review");
 
       // 2. Start a session on the e2e-review flow.
       const { session: created } = await rpc.call<{ session: any }>("session/start", {
@@ -273,11 +307,7 @@ describe("T5a -- transient retry succeeds after 3 failures", () => {
   test(
     "flaky_pr retries 3x then completes session",
     async () => {
-      mkdirSync(join(arkDir, "flows"), { recursive: true });
-      copyFileSync(
-        join(REPO_ROOT, "e2e", "fixtures", "flows", "e2e-retry.yaml"),
-        join(arkDir, "flows", "e2e-retry.yaml"),
-      );
+      await ingestFixtureFlow("e2e-retry");
 
       const { session: created } = await rpc.call<{ session: any }>("session/start", {
         flow: "e2e-retry",
@@ -309,11 +339,7 @@ describe("T5b -- non-retryable AuthError fails fast", () => {
   test(
     "AuthError causes immediate session failure (no retries)",
     async () => {
-      mkdirSync(join(arkDir, "flows"), { recursive: true });
-      copyFileSync(
-        join(REPO_ROOT, "e2e", "fixtures", "flows", "e2e-retry-nonretryable.yaml"),
-        join(arkDir, "flows", "e2e-retry-nonretryable.yaml"),
-      );
+      await ingestFixtureFlow("e2e-retry-nonretryable");
 
       const started = Date.now();
       const { session: created } = await rpc.call<{ session: any }>("session/start", {
