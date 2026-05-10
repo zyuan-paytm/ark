@@ -37,6 +37,15 @@ export interface OrchestrationDeps {
   statusPollers: StatusPollerRegistry;
   /** Phase 3.6: raw DB adapter for idempotency ledger in executeAction. */
   db: DatabaseAdapter;
+  /**
+   * Phase 3.7 escape hatch: the full AppContext when one is available
+   * (the Temporal worker boots its own). In-process executors that still
+   * read app-only methods (`resolveComputeTarget`, `getCompute`, `getIsolation`,
+   * `forTenant`) read through here instead of going through the synthetic
+   * shim. Activities should never use this directly -- it exists solely to
+   * let `dispatch-deps.buildAppShim` return the real thing when possible.
+   */
+  app?: import("../app.js").AppContext;
 }
 
 /** Derive narrow deps from a full AppContext for local/transition use. */
@@ -58,5 +67,6 @@ export function depsFromApp(app: import("../app.js").AppContext): OrchestrationD
     flowStates: app.flowStates,
     statusPollers: app.statusPollers,
     db: app.db,
+    app,
   };
 }

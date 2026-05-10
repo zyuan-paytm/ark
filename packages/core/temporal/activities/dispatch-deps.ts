@@ -40,6 +40,13 @@ import { executeAction } from "../../services/actions/index.js";
  * the shim shrinks toward zero.
  */
 function buildAppShim(d: OrchestrationDeps): AppContext {
+  // Prefer the real AppContext when the deps were produced from one (the
+  // Temporal worker boots its own in worker.ts). Helpers that need
+  // app-only methods (`resolveComputeTarget`, `getCompute`, `getIsolation`,
+  // `forTenant`, etc.) see the full surface and Just Work without the
+  // shim catching up to every field. The synthetic shim below remains for
+  // call sites that don't have a real app (e.g. unit tests).
+  if (d.app) return d.app;
   return {
     sessions: d.sessions,
     events: d.events,

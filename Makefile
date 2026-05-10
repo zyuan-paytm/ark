@@ -12,7 +12,7 @@
 #   make build         Build native macOS binary + Electron app
 #   make package       Package everything for distribution
 
-.PHONY: help install dev dev-daemon dev-arkd dev-web dev-temporal dev-temporal-down dev-control-plane dev-control-plane-down claude-tfy pi-tfy web desktop \
+.PHONY: help install dev dev-daemon dev-arkd dev-web dev-temporal dev-temporal-down dev-temporal-worker dev-docker dev-stack dev-stack-down dev-stack-bootstrap dev-control-plane dev-control-plane-down claude-tfy pi-tfy web desktop \
         test test-file test-e2e test-e2e-fast test-e2e-web test-e2e-web-dev test-install test-watch lint lint-fix \
         format format-check \
         docs-cli \
@@ -37,7 +37,7 @@ CLAUDE_CONTINUE_FLAGS := $(if $(filter 0,$(CLAUDE_CONTINUE)),,--continue)
 help: ## Show available commands
 	@echo ""
 	@echo "  \033[1mDevelopment\033[0m"
-	@grep -E '^(install|dev|dev-daemon|dev-arkd|dev-web|dev-stack|dev-stack-down|dev-control-plane|dev-control-plane-down|claude-tfy|pi-tfy|web|desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(install|dev|dev-daemon|dev-arkd|dev-web|dev-docker|dev-temporal|dev-temporal-down|dev-temporal-worker|dev-stack|dev-stack-down|dev-stack-bootstrap|dev-control-plane|dev-control-plane-down|claude-tfy|pi-tfy|web|desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1mTesting\033[0m"
 	@grep -E '^(test|test-file|test-e2e|test-install|test-watch|lint|format):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -83,11 +83,13 @@ dev-daemon: ## Hot-reload: server daemon (conductor :19100 + arkd :19300 + WS :1
 	@echo ""
 	$(BUN) --watch packages/cli/index.ts server daemon start
 
-dev-arkd: ## Hot-reload: arkd agent daemon (:19300)
-	@echo "\033[1mArkD agent daemon (hot-reload)\033[0m"
-	@echo "  ArkD:  http://localhost:19300"
-	@echo ""
-	$(BUN) --watch packages/cli/index.ts arkd
+dev-arkd: ## Hot-reload: arkd agent daemon (port from .env.control-plane = :19301)
+	@test -f .env.control-plane || { echo ".env.control-plane missing"; exit 1; }
+	@set -a && . ./.env.control-plane && set +a && \
+	  echo "\033[1mArkD agent daemon (hot-reload)\033[0m" && \
+	  echo "  ArkD:  http://localhost:$$ARK_ARKD_PORT" && \
+	  echo "" && \
+	  $(BUN) --watch packages/cli/index.ts arkd
 
 dev-web: ## Hot-reload: API server (:8420) + Vite frontend (:5173)
 	@echo "\033[1mArk Web (hot-reload)\033[0m"
@@ -102,7 +104,11 @@ dev-web: ## Hot-reload: API server (:8420) + Vite frontend (:5173)
 dev-temporal: ## Start local Temporal cluster (server :7233 + UI :8088) for Phase 0/1
 	@command -v docker >/dev/null 2>&1 || { echo "Docker required. Install Docker Desktop."; exit 1; }
 	@echo "\033[1mStarting Ark local Temporal cluster...\033[0m"
-	docker compose -f .infra/docker-compose.temporal.yaml -p ark-temporal up -d --wait
+	# `--wait` fails when the run-once `temporal-admin` container exits 0
+	# (which it is supposed to do after registering the namespace). Run
+	# without --wait and rely on the per-service healthchecks plus the
+	# follow-up health probe in dev-stack.
+	$(DOCKER_COMPOSE) -f .infra/docker-compose.temporal.yaml -p ark-temporal up -d
 	@echo ""
 	@echo "  Temporal gRPC:   localhost:7233     (ARK_TEMPORAL_ADDRESS=localhost:7233)"
 	@echo "  Temporal UI:     http://localhost:8088"
@@ -112,7 +118,7 @@ dev-temporal: ## Start local Temporal cluster (server :7233 + UI :8088) for Phas
 	@echo "  See docs/temporal-local-dev.md for next steps."
 
 dev-temporal-down: ## Stop and remove the local Temporal cluster + its data volume
-	docker compose -f .infra/docker-compose.temporal.yaml -p ark-temporal down -v
+	$(DOCKER_COMPOSE) -f .infra/docker-compose.temporal.yaml -p ark-temporal down -v
 	@echo "Ark local Temporal cluster stopped."
 
 # Pick whichever docker compose CLI is on PATH. Modern installs ship the
@@ -120,21 +126,68 @@ dev-temporal-down: ## Stop and remove the local Temporal cluster + its data volu
 # ship as `docker-compose`. Some laptop setups have only one of the two.
 DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
-dev-stack: build-web ## Start local Ark dev stack (Postgres :15433 + Redis :6379) and build web bundle
+dev-docker: ## Sub-target: Postgres :15433 + Redis :6379 containers (was: dev-stack)
 	@command -v docker >/dev/null 2>&1 || { echo "Docker required. Install Docker Desktop."; exit 1; }
-	@echo "\033[1mStarting Ark dev stack (Postgres + Redis)...\033[0m"
+	@echo "\033[1mStarting Ark dev docker (Postgres + Redis)...\033[0m"
 	$(DOCKER_COMPOSE) -f .infra/docker-compose.dev.yaml -p ark-dev up -d --wait
 	@echo ""
 	@echo "  Postgres:  postgres://ark:ark@localhost:15433/ark"
 	@echo "  Redis:     redis://localhost:6379"
+
+dev-temporal-worker: ## Sub-target: Temporal worker on host (Node + tsx; Bun lacks v8.promiseHooks)
+	@command -v node >/dev/null || { echo "Node required for Temporal worker"; exit 1; }
+	@command -v tsx >/dev/null || { echo "Installing tsx globally..."; npm install -g tsx; }
+	@test -f .env.control-plane || { echo ".env.control-plane missing"; exit 1; }
+	@set -a && . ./.env.control-plane && set +a && \
+	  echo "\033[1mArk Temporal worker (host, Node + tsx)\033[0m" && \
+	  echo "  Temporal:  $$ARK_TEMPORAL_SERVER_URL  ns=$$ARK_TEMPORAL_NAMESPACE" && \
+	  echo "  arkd:      $$ARK_ARKD_URL" && \
+	  echo "  conductor: http://localhost:$$ARK_WEB_PORT" && \
+	  echo "" && \
+	  exec tsx packages/core/temporal/worker.ts
+
+dev-stack: dev-docker dev-temporal ## Boot full laptop dev stack -- docker + arkd + temporal worker + ark server
+	@test -f .env.control-plane || { echo ".env.control-plane missing"; exit 1; }
 	@echo ""
-	@echo "  Next: source .env.control-plane && bun packages/cli/index.ts server start --hosted"
+	@echo "\033[1mArk dev stack -- full laptop\033[0m"
+	@set -a && . ./.env.control-plane && set +a && \
+	  echo "  ark server:        http://localhost:$$ARK_WEB_PORT" && \
+	  echo "  arkd:              http://localhost:$$ARK_ARKD_PORT" && \
+	  echo "  Temporal UI:       http://localhost:8088" && \
+	  echo "  Temporal gRPC:     $$ARK_TEMPORAL_SERVER_URL  ns=$$ARK_TEMPORAL_NAMESPACE" && \
+	  echo "  Postgres:          localhost:15433" && \
+	  echo "  Redis:             localhost:6379" && \
+	  echo "" && \
+	  echo "  One-time after first boot:  make dev-stack-bootstrap" && \
+	  echo "  Stop everything:            make dev-stack-down" && \
+	  echo ""
+	@set -a ; . ./.env.control-plane ; set +a ; \
+	  trap 'kill 0' EXIT ; \
+	  $(BUN) --watch packages/cli/index.ts arkd 2>&1 | sed 's/^/[arkd]   /' & \
+	  sleep 2 && tsx packages/core/temporal/worker.ts 2>&1 | sed 's/^/[worker] /' & \
+	  sleep 1 && $(BUN) packages/cli/index.ts server start --hosted --port $$ARK_WEB_PORT 2>&1 | sed 's/^/[server] /' & \
+	  wait
 
-dev-stack-down: ## Stop and remove the local Ark dev stack + its data volumes
-	$(DOCKER_COMPOSE) -f .infra/docker-compose.dev.yaml -p ark-dev down -v
-	@echo "Ark local dev stack stopped."
+dev-stack-down: ## Stop everything: containers + any host processes still listening
+	@$(DOCKER_COMPOSE) -f .infra/docker-compose.dev.yaml      -p ark-dev      down 2>&1 | sed 's/^/[ark-dev]    /' || true
+	@$(DOCKER_COMPOSE) -f .infra/docker-compose.temporal.yaml -p ark-temporal down 2>&1 | sed 's/^/[temporal]   /' || true
+	@set -a && . ./.env.control-plane && set +a && \
+	  for port in $$ARK_WEB_PORT $$ARK_CONDUCTOR_PORT $$ARK_ARKD_PORT; do \
+	    pid=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	    if [ -n "$$pid" ]; then echo "killing PID $$pid on :$$port"; kill $$pid 2>/dev/null || true; fi; \
+	  done
 
-dev-control-plane: dev-stack ## Boot Ark in control-plane (hosted) mode against local Postgres + Redis
+dev-stack-bootstrap: ## One-time: register `compute/create local` so dispatch can run
+	@test -f .env.control-plane || { echo ".env.control-plane missing"; exit 1; }
+	@set -a && . ./.env.control-plane && set +a && \
+	  echo "Registering compute=local against ark server on :$$ARK_WEB_PORT..." && \
+	  curl -sf -X POST http://localhost:$$ARK_WEB_PORT/api/rpc \
+	    -H 'Content-Type: application/json' \
+	    -d '{"jsonrpc":"2.0","id":"1","method":"compute/create","params":{"name":"local","compute":"local","isolation":"direct"}}' \
+	  | (jq . 2>/dev/null || cat) ; \
+	  echo
+
+dev-control-plane: dev-docker ## Boot Ark in control-plane (hosted) mode against local Postgres + Redis
 	@test -f .env.control-plane || { echo ".env.control-plane missing -- copy from repo"; exit 1; }
 	@echo "\033[1mStarting Ark control-plane (hosted)...\033[0m"
 	@set -a && . ./.env.control-plane && set +a && \
