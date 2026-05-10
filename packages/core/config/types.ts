@@ -200,6 +200,16 @@ export interface TemporalConfig {
    * @default false
    */
   workerEnabled: boolean;
+  /**
+   * Hard wall-clock cap passed to `client.workflow.start({ workflowExecutionTimeout })`.
+   * Without it, an orphan workflow (worker crash, stop() that didn't cleanly
+   * terminate, signal that never arrives) sits in Temporal's history table as
+   * Running until the namespace retention period expires. Format: Temporal
+   * duration string (e.g. "24h", "5m").
+   * @envvar ARK_TEMPORAL_WORKFLOW_EXECUTION_TIMEOUT
+   * @default "24h"
+   */
+  workflowExecutionTimeout?: string;
 }
 
 /**

@@ -159,6 +159,9 @@ export function registerServices(
                   const handle = await client.workflow.start("sessionWorkflow", {
                     taskQueue: `ark.${tenantId}.stages`,
                     workflowId: wfId,
+                    // Hard wall-clock cap so a stuck workflow eventually closes
+                    // itself. See SessionService.start() for rationale.
+                    workflowExecutionTimeout: (c.config.temporal?.workflowExecutionTimeout ?? "24h") as any,
                     args: [{ sessionId, tenantId, flowName }],
                   });
                   return { workflowId: wfId, runId: handle.firstExecutionRunId };

@@ -361,6 +361,10 @@ function assemble(defaults: ProfileDefaults, overrides: LoadConfigOptions, profi
       defaults.temporal?.taskQueueAssignments ??
       temporalDefaults.taskQueueAssignments,
     workerEnabled: merged.temporal?.workerEnabled ?? defaults.temporal?.workerEnabled ?? temporalDefaults.workerEnabled,
+    workflowExecutionTimeout:
+      process.env.ARK_TEMPORAL_WORKFLOW_EXECUTION_TIMEOUT ??
+      merged.temporal?.workflowExecutionTimeout ??
+      defaults.temporal?.workflowExecutionTimeout,
   };
   // DATABASE_URL takes precedence; fall back to assembling from DB_* parts
   // (host/port/user/password/name). The latter is ergonomic for k8s where

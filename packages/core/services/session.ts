@@ -112,6 +112,10 @@ export class SessionService {
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue: `ark.${app.tenantId ?? "default"}.stages`,
         workflowId: wfId,
+        // Hard wall-clock cap so a stuck workflow eventually closes itself.
+        // Without this, an orphan (worker crash, stop() that didn't terminate,
+        // signal that never arrives) stays Running until namespace retention.
+        workflowExecutionTimeout: (app.config.temporal?.workflowExecutionTimeout ?? "24h") as any,
         args: [
           {
             sessionId: session.id,
@@ -147,6 +151,8 @@ export class SessionService {
       return { ok: true, message: "OK", sessionId: id };
     }
 
+    await this.terminateTemporalWorkflowIfAny(session, "user stopped");
+
     // If there's a running process and AppContext is available, delegate to
     // orchestration for full cleanup (tmux kill, provider cleanup, hooks removal)
     if (session.session_id) {
@@ -170,6 +176,27 @@ export class SessionService {
     });
 
     return { ok: true, message: "OK", sessionId: id };
+  }
+
+  /**
+   * Terminate the Temporal workflow tied to a session, if any. Best-effort:
+   * swallows "workflow not found / already-terminal" errors. Called on
+   * stop/delete so a session row going to a terminal state takes its
+   * workflow with it instead of leaking a Running execution in Temporal.
+   */
+  private async terminateTemporalWorkflowIfAny(session: Session, reason: string): Promise<void> {
+    if (session.orchestrator !== "temporal" || !session.workflow_id) return;
+    try {
+      const factory = this._temporalClientFactory ?? (await import("../temporal/client.js")).getTemporalClient;
+      const client = await factory(this.app.config.temporal);
+      const handle = client.workflow.getHandle(session.workflow_id);
+      await handle.terminate(reason);
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      // Already-terminal / not-found are expected and harmless.
+      if (/not found|already (?:terminat|complet|cancel|fail)/i.test(msg)) return;
+      logDebug("session", `terminateTemporalWorkflowIfAny: ${session.workflow_id} -- ${msg}`);
+    }
   }
 
   /**
@@ -538,6 +565,7 @@ export class SessionService {
     const session = await this.sessions.get(id);
     if (!session) return { ok: false, message: `Session ${id} not found` };
 
+    await this.terminateTemporalWorkflowIfAny(session, "session deleted");
     await this.sessions.softDelete(id);
 
     await this.events.log(id, "session_deleted", { actor: "user" });

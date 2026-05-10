@@ -8,7 +8,7 @@
  * Run: ARK_E2E_STACK_RUNNING=1 bun test e2e/temporal-control-plane.test.ts
  */
 
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, copyFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
@@ -22,6 +22,18 @@ const ENV_FILE = join(REPO_ROOT, ".env.e2e");
 let arkDir: string;
 let server: ServerHandle;
 let rpc: RpcClient;
+
+/**
+ * Tracks sessions the test created so afterEach can stop them. Calling
+ * session/stop drives the same SessionService.stop() path that production
+ * uses, which now terminates the Temporal workflow alongside the row update.
+ *
+ * Without this, every iteration on a single test leaks a Running workflow into
+ * Temporal's history table -- by run #20 the UI is unusable. The full-suite
+ * teardown (`composeDown` -> `down -v`) wipes the volume and so is fine, but
+ * single-test iteration was the painful path.
+ */
+const createdSessionIds: string[] = [];
 
 beforeAll(async () => {
   arkDir = mkdtempSync(join(tmpdir(), "ark-temporal-e2e-"));
@@ -52,6 +64,28 @@ afterAll(async () => {
   if (arkDir) rmSync(arkDir, { recursive: true, force: true });
 }, 30_000);
 
+/**
+ * Stop every session this test file created. session/stop now goes through
+ * SessionService.stop() which terminates the Temporal workflow as part of
+ * the stop sequence (PR #538 cleanup edit). afterEach must never throw, so
+ * already-stopped / not-found responses are swallowed.
+ */
+afterEach(async () => {
+  while (createdSessionIds.length > 0) {
+    const sessionId = createdSessionIds.shift()!;
+    try {
+      await rpc.call("session/stop", { sessionId, force: true });
+    } catch {
+      // already stopped / session gone -- not a test failure
+    }
+  }
+}, 15_000);
+
+/** Helper: register a session for afterEach cleanup. */
+function trackSession(session: { id: string }): void {
+  createdSessionIds.push(session.id);
+}
+
 // ── T1: Temporal routing assertions ────────────────────────────────────────
 //
 // Phase 2 design: SessionService.start() in Temporal mode kicked BOTH the
@@ -75,6 +109,7 @@ describe("T1 -- Temporal routing", () => {
         flow: "e2e-docs",
         summary: "T1-temporal-routing",
       });
+      trackSession(created);
 
       // Routing: set at session creation time, no worker needed
       expect(created.orchestrator).toBe("temporal");
@@ -115,6 +150,7 @@ describe("T2 -- concurrent Temporal routing", () => {
       );
 
       const sessions = starts.map((s) => s.session);
+      sessions.forEach(trackSession);
       const wfIds = new Set(sessions.map((s) => s.workflow_id));
       const runIds = new Set(sessions.map((s) => s.workflow_run_id));
 
@@ -161,6 +197,7 @@ describe("T3 -- manual gate across server restart", () => {
         flow: "e2e-review",
         summary: "T3-review-gate-restart",
       });
+      trackSession(created);
       expect(created.orchestrator).toBe("temporal");
 
       // 3. Wait for the workflow to move the session out of "pending" (i.e.
@@ -246,6 +283,7 @@ describe("T5a -- transient retry succeeds after 3 failures", () => {
         flow: "e2e-retry",
         summary: "T5a-transient-retry",
       });
+      trackSession(created);
       expect(created.orchestrator).toBe("temporal");
 
       // flaky_pr fails 3x then succeeds; retries add latency so allow 120 s.
@@ -282,6 +320,7 @@ describe("T5b -- non-retryable AuthError fails fast", () => {
         flow: "e2e-retry-nonretryable",
         summary: "T5b-auth-fail-fast",
       });
+      trackSession(created);
       expect(created.orchestrator).toBe("temporal");
 
       const final = await waitFor(
