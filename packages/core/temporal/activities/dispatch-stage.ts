@@ -26,6 +26,25 @@ export async function dispatchStageActivity(input: {
 }): Promise<DispatchStageResult> {
   const d = deps();
 
+  // Synchronise session.stage with the workflow's stageIdx before dispatching.
+  // The dispatch chain reads `session.stage` (set at session create from
+  // flow.stages[0].name) -- without this update, every workflow iteration
+  // dispatches the same first stage and never advances. The bespoke engine's
+  // StageAdvanceService keeps these in sync; under Temporal the workflow
+  // tracks stageIdx and is responsible for projecting it onto the row.
+  const session = await d.sessions.get(input.sessionId);
+  if (session) {
+    const flow = d.flows.get(session.flow);
+    const flowDef =
+      flow && typeof (flow as { then?: unknown }).then === "function"
+        ? await (flow as Promise<import("../../services/flow.js").FlowDefinition | null>)
+        : (flow as import("../../services/flow.js").FlowDefinition | null);
+    const targetStage = flowDef?.stages?.[input.stageIdx]?.name;
+    if (targetStage && session.stage !== targetStage) {
+      await d.sessions.update(input.sessionId, { stage: targetStage, status: "ready", error: null });
+    }
+  }
+
   const dispatchDeps = buildDispatchDeps(d);
   const svc = new DispatchService(dispatchDeps);
 

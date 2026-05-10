@@ -40,10 +40,13 @@ export async function awaitStageCompletionActivity(input: {
     }
 
     const status = session.status as string;
-    if (["completed", "failed", "stopped", "archived"].includes(status)) {
-      // Map archived -> stopped for the workflow's state machine.
+    // "ready" is the per-stage-done signal under Temporal orchestration --
+    // status-poller writes "ready" instead of "completed" between stages so
+    // external observers don't see a stale terminal state during the
+    // inter-stage gap. We map it to "completed" for the workflow.
+    if (["completed", "failed", "stopped", "archived", "ready"].includes(status)) {
       const mapped: StageCompletionResult["status"] =
-        status === "archived" ? "stopped" : (status as StageCompletionResult["status"]);
+        status === "archived" ? "stopped" : status === "ready" ? "completed" : (status as StageCompletionResult["status"]);
       return { status: mapped };
     }
 

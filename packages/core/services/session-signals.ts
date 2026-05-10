@@ -249,7 +249,16 @@ export async function handleReport(app: AppContext, sessionId: string, report: O
   }
 
   if (result.shouldAdvance) {
-    try {
+    // See report-pipeline.ts for the rationale: under Temporal orchestration
+    // the session-workflow loop drives stage advancement, so the bespoke
+    // mediateStageHandoff would race the workflow's dispatchStageActivity.
+    const sessionForOrch = await app.sessions.get(sessionId);
+    if (sessionForOrch?.orchestrator === "temporal") {
+      logDebug(
+        "conductor",
+        `channel_report: skipping bespoke handoff for ${sessionId} -- Temporal workflow drives advancement`,
+      );
+    } else try {
       const handoff = await app.sessionHooks.mediateStageHandoff(sessionId, {
         autoDispatch: result.shouldAutoDispatch,
         source: "channel_report",

@@ -37,7 +37,22 @@ export async function handleReport(app: AppContext, sessionId: string, report: O
   }
 
   if (result.shouldAdvance) {
-    try {
+    // Under Temporal orchestration, the session-workflow loop drives stage
+    // advancement -- it polls session.status via awaitStageCompletionActivity
+    // and dispatches the next stage itself. Running the bespoke handoff here
+    // would race the workflow: the listener dispatches stage N+1 immediately
+    // off the channel report, while the workflow's own dispatchStageActivity
+    // (with its retry envelope) is still scheduling. The bespoke single-shot
+    // dispatch wins, fails are not retried, and the workflow short-circuits
+    // on the now-failed session. Skipping here keeps Temporal as the sole
+    // driver of stage transitions.
+    const sessionForOrch = await app.sessions.get(sessionId);
+    if (sessionForOrch?.orchestrator === "temporal") {
+      logDebug(
+        "conductor",
+        `channel_report: skipping bespoke handoff for ${sessionId} -- Temporal workflow drives advancement`,
+      );
+    } else try {
       const handoff = await app.sessionHooks.mediateStageHandoff(sessionId, {
         autoDispatch: result.shouldAutoDispatch,
         source: "channel_report",

@@ -154,7 +154,32 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       mode,
     });
 
-    const launch = await dispatchStageActivity({ sessionId: input.sessionId, stageIdx });
+    let launch: import("../types.js").DispatchStageResult;
+    try {
+      launch = await dispatchStageActivity({ sessionId: input.sessionId, stageIdx });
+    } catch (err) {
+      // Dispatch failed (transient retries exhausted, non-retryable, or
+      // terminal application failure). Project the failure onto the session
+      // row so external observers (the e2e test, the web UI) see a terminal
+      // state instead of the stale `ready` we wrote pre-dispatch in
+      // dispatchStageActivity. Without this the session sits at `ready`
+      // forever and the workflow's failure signal is invisible.
+      await projectStageActivity({
+        sessionId: input.sessionId,
+        stageIdx,
+        seq: seq(),
+        patch: { status: "failed", error: String((err as Error)?.message ?? err) },
+        mode,
+      });
+      await projectSessionActivity({
+        sessionId: input.sessionId,
+        seq: seq(),
+        patch: { status: "failed", error: String((err as Error)?.message ?? err) },
+        mode,
+      });
+      throw err;
+    }
+
     await projectStageActivity({
       sessionId: input.sessionId,
       stageIdx,
