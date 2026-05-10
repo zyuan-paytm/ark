@@ -10,4 +10,4 @@ mkdir -p "$PLUGIN_DIR" "$FLOW_DIR"
 if [ -d /app/e2e/fixtures/flows ]; then
   cp /app/e2e/fixtures/flows/*.yaml "$FLOW_DIR/" 2>/dev/null || true
 fi
-exec bun run packages/core/temporal/worker.ts
+exec tsx packages/core/temporal/worker.ts
