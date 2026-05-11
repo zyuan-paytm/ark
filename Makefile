@@ -12,7 +12,7 @@
 #   make build         Build native macOS binary + Electron app
 #   make package       Package everything for distribution
 
-.PHONY: help install dev dev-daemon dev-arkd dev-web dev-temporal dev-temporal-down dev-temporal-worker dev-docker dev-stack dev-stack-down dev-stack-bootstrap dev-control-plane dev-control-plane-down claude-tfy pi-tfy web desktop \
+.PHONY: help install dev dev-daemon dev-arkd dev-web dev-temporal dev-temporal-down dev-temporal-worker dev-docker dev-stack dev-stack-down dev-stack-bootstrap claude-tfy pi-tfy web desktop \
         test test-file test-e2e test-e2e-fast test-e2e-web test-e2e-web-dev test-install test-watch lint lint-fix \
         format format-check \
         docs-cli \
@@ -37,7 +37,7 @@ CLAUDE_CONTINUE_FLAGS := $(if $(filter 0,$(CLAUDE_CONTINUE)),,--continue)
 help: ## Show available commands
 	@echo ""
 	@echo "  \033[1mDevelopment\033[0m"
-	@grep -E '^(install|dev|dev-daemon|dev-arkd|dev-web|dev-docker|dev-temporal|dev-temporal-down|dev-temporal-worker|dev-stack|dev-stack-down|dev-stack-bootstrap|dev-control-plane|dev-control-plane-down|claude-tfy|pi-tfy|web|desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(install|dev|dev-daemon|dev-arkd|dev-web|dev-docker|dev-temporal|dev-temporal-down|dev-temporal-worker|dev-stack|dev-stack-down|dev-stack-bootstrap|claude-tfy|pi-tfy|web|desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1mTesting\033[0m"
 	@grep -E '^(test|test-file|test-e2e|test-install|test-watch|lint|format):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -187,18 +187,6 @@ dev-stack-bootstrap: ## One-time: register `compute/create local` so dispatch ca
 	  | (jq . 2>/dev/null || cat) ; \
 	  echo
 
-dev-control-plane: dev-docker ## Boot Ark in control-plane (hosted) mode against local Postgres + Redis
-	@test -f .env.control-plane || { echo ".env.control-plane missing -- copy from repo"; exit 1; }
-	@echo "\033[1mStarting Ark control-plane (hosted)...\033[0m"
-	@set -a && . ./.env.control-plane && set +a && \
-	  echo "  ARK_PROFILE=$$ARK_PROFILE  WEB=:$$ARK_WEB_PORT  DB=$$DATABASE_URL" && \
-	  exec $(BUN) packages/cli/index.ts server start --hosted --port $$ARK_WEB_PORT
-
-dev-control-plane-down: ## Stop the running hosted server (port from .env.control-plane)
-	@set -a && . ./.env.control-plane && set +a && \
-	  pid=$$(lsof -nP -iTCP:$$ARK_WEB_PORT -sTCP:LISTEN -t 2>/dev/null | head -1); \
-	  if [ -n "$$pid" ]; then echo "Killing hosted server PID $$pid on :$$ARK_WEB_PORT"; kill $$pid; else echo "No hosted server listening on :$$ARK_WEB_PORT"; fi
-
 spike-temporal-bun: ## Run the Phase 0 Bun / Temporal worker compat spike
 	@./scripts/spike-temporal-bun.sh
 
@@ -267,34 +255,48 @@ test-file: ## Run a single test: make test-file F=packages/core/__tests__/foo.te
 
 test-e2e: test-web-e2e ## Run all end-to-end tests (web Playwright)
 
-# Control-plane e2e: real `ark server start --hosted` against an isolated
-# Docker compose stack (Postgres :15434 + Redis :6380 + Temporal :7234 +
-# temporal-worker container). Distinct from the dev stack so this can run
-# alongside `make dev-stack`.
+# Control-plane e2e -- the test-side counterpart of `dev-stack`.
 #
-# Single entry point for every docker-stack e2e test file in `e2e/`. Boots
-# the compose stack once, runs the bespoke control-plane test, then runs
-# the Temporal T1-T5 suite against the same stack via ARK_E2E_STACK_RUNNING=1
-# (avoids a second cold-start of Postgres + Temporal). Tears the stack down
-# even if any sub-test fails.
+# `dev-stack` brings up the full hosted-mode stack (Postgres + Redis + Temporal
+# + worker + arkd + ark server) and runs the dev processes against it; the
+# stack stays up across `Ctrl+C` so the developer can iterate.
+# `test-e2e-control-plane` mirrors that shape for the test side: bring up an
+# isolated stack (shifted +1 from dev ports so both can coexist), run every
+# docker-stack e2e test file in `e2e/`, and leave the stack up for re-runs.
+# Tear down explicitly via `test-e2e-control-plane-down`.
 #
-# CI must have docker + tmux on PATH. The test boots the stack, spawns the
-# real server binary, and exercises the dispatch chain via /api/rpc -- never
-# imports AppContext directly.
-test-e2e-control-plane: ## Run all docker-stack e2e tests (bespoke + Temporal T1-T5)
-	@command -v docker >/dev/null 2>&1 || { echo "Docker required for control-plane e2e."; exit 1; }
+# Iteration loop:
+#   make test-e2e-control-plane        # boots stack (idempotent) + runs tests
+#   make test-e2e-control-plane        # re-uses stack, much faster
+#   make test-e2e-control-plane-down   # stop + drop volumes when done
+#
+# Test files run sequentially against the same stack via ARK_E2E_STACK_RUNNING=1
+# so their internal compose lifecycle is a no-op.
+#
+# CI must have docker + tmux on PATH. The test spawns the real `ark server
+# start --hosted` binary and exercises the dispatch chain via /api/rpc --
+# never imports AppContext directly.
+test-e2e-control-plane: test-e2e-control-plane-up ## Run all docker-stack e2e tests (boots stack, leaves it up)
 	@command -v tmux >/dev/null 2>&1 || { echo "tmux required for control-plane e2e (brew install tmux / apt-get install tmux)."; exit 1; }
-	@echo "\033[1mBringing up e2e Docker stack (Postgres :15434 + Redis :6380 + Temporal :7234)...\033[0m"
-	@$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e up -d --wait
+	@# Migration runner uses session-scoped `pg_advisory_lock` which is
+	@# released on connection close. The hosted ark server has no SIGTERM
+	@# handler that drains the postgres pool, so a SIGKILL'd test run leaves
+	@# orphan idle connections holding the migration lock. Subsequent boots
+	@# block forever on `pg_advisory_lock(hashtext('ark_migrations'))`. Until
+	@# the server learns graceful shutdown, terminate every non-self backend
+	@# in the ark DB before each test run. Safe because the test owns the
+	@# whole stack lifecycle while this target is executing.
+	@$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e exec -T postgres \
+	  psql -U ark -d ark -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='ark' AND pid <> pg_backend_pid();" >/dev/null 2>&1 || true
 	@echo "\033[1mRunning bespoke control-plane e2e...\033[0m"
-	@set -e; \
-	  trap '$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e down -v' EXIT; \
-	  ARK_E2E_STACK_RUNNING=1 $(BUN) test e2e/control-plane.test.ts; \
-	  echo "\033[1mRunning Temporal T1-T5 e2e...\033[0m"; \
-	  ARK_E2E_STACK_RUNNING=1 $(BUN) test e2e/temporal-control-plane.test.ts
+	@ARK_E2E_STACK_RUNNING=1 $(BUN) test e2e/control-plane.test.ts
+	@echo "\033[1mRunning Temporal T1-T5 e2e...\033[0m"
+	@ARK_E2E_STACK_RUNNING=1 $(BUN) test e2e/temporal-control-plane.test.ts
 
-test-e2e-control-plane-up: ## Bring up the e2e Docker stack only (debug aid)
-	$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e up -d --wait
+test-e2e-control-plane-up: ## Bring up the e2e Docker stack (Postgres :15434 + Redis :6380 + Temporal :7234)
+	@command -v docker >/dev/null 2>&1 || { echo "Docker required for control-plane e2e."; exit 1; }
+	@echo "\033[1mBringing up e2e Docker stack...\033[0m"
+	@$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e up -d --wait
 
 test-e2e-control-plane-down: ## Tear down the e2e Docker stack and volumes
 	$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e down -v

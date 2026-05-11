@@ -182,9 +182,9 @@ jobs:
         run: make test-e2e-control-plane
 
       # Capture every container's stdout/stderr on failure so post-mortems
-      # aren't blind. The compose stack is torn down by the Makefile target's
-      # trap; logs are written by docker daemon and only survive teardown if
-      # we grab them before the volumes go.
+      # aren't blind. Logs are written by docker daemon and only survive
+      # teardown if we grab them BEFORE `test-e2e-control-plane-down` drops
+      # the volumes.
       - name: Dump docker compose logs (on failure)
         if: failure()
         run: |
@@ -201,6 +201,13 @@ jobs:
             /tmp/ark-*.log
           retention-days: 7
           if-no-files-found: ignore
+
+      # Mirror of `dev-stack` -> `dev-stack-down`: the test target leaves the
+      # stack up for iteration, so CI must tear it down explicitly. `always()`
+      # ensures cleanup runs whether tests passed or failed.
+      - name: Tear down e2e Docker stack
+        if: always()
+        run: make test-e2e-control-plane-down || true
 
   # Build binaries for all 4 platforms
   build:
