@@ -163,9 +163,10 @@ dev-control-plane: dev-docker dev-temporal ## Boot full laptop dev stack -- dock
 	  echo ""
 	@set -a ; . ./.env.control-plane ; set +a ; \
 	  trap 'kill 0' EXIT ; \
-	  $(BUN) --watch packages/cli/index.ts arkd 2>&1 | sed 's/^/[arkd]   /' & \
-	  sleep 2 && tsx packages/core/temporal/worker.ts 2>&1 | sed 's/^/[worker] /' & \
-	  sleep 1 && $(BUN) packages/cli/index.ts server start --hosted --port $$ARK_WEB_PORT 2>&1 | sed 's/^/[server] /' & \
+	  $(BUN) --watch packages/cli/index.ts arkd 2>&1 | sed 's/^/[arkd]    /' & \
+	  sleep 2 && tsx packages/core/temporal/worker.ts 2>&1 | sed 's/^/[worker]  /' & \
+	  sleep 1 && $(BUN) packages/cli/index.ts server start --hosted --port $$ARK_WEB_PORT 2>&1 | sed 's/^/[server]  /' & \
+	  sleep 2 && $(BUN) packages/cli/index.ts server daemon start --port $$ARK_CONDUCTOR_PORT 2>&1 | sed 's/^/[daemon]  /' & \
 	  wait
 
 dev-control-plane-down: ## Stop everything: containers + any host processes still listening

@@ -452,6 +452,23 @@ export function startWebServer(app: AppContext, opts?: WebServerOptions): { stop
           const authAttr = token ? ' data-auth="true"' : "";
           const rootAttrs = `id="root"${readOnly ? ' data-readonly="true"' : ""}${authAttr}`;
           html = html.replace('id="root"', rootAttrs);
+          // Server-discovered config injection. Lets the SPA learn the
+          // conductor WS URL (where /terminal/:sessionId lives) without
+          // hardcoding a port. The conductor lives on `config.ports.conductor`
+          // -- in dev-control-plane that's `ARK_CONDUCTOR_PORT` (19101 today);
+          // in local mode it defaults to 19400. Without this tag, the SPA
+          // would have had to hardcode 19400 and break under every non-default
+          // port deployment.
+          const conductorPort = app.config.ports.conductor;
+          const proto = "ws"; // server-rendered; SPA upgrades to wss when it sees https:
+          const conductorWsBase = `${proto}://${app.config.ports.web ? "__HOST__" : "localhost"}:${conductorPort}`;
+          // The "__HOST__" placeholder is replaced by the SPA at runtime
+          // (window.location.hostname) so the user can hit the web UI from
+          // any hostname (localhost, 127.0.0.1, LAN IP, public DNS) and the
+          // terminal WS connects back to the same hostname on the conductor
+          // port.
+          const metaTag = `<meta name="ark-conductor-ws-base" content="${conductorWsBase}">`;
+          html = html.replace("</head>", `  ${metaTag}\n  </head>`);
           return new Response(html, {
             headers: { "Content-Type": "text/html", ...CORS },
           });
