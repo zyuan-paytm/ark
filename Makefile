@@ -12,7 +12,7 @@
 #   make build         Build native macOS binary + Electron app
 #   make package       Package everything for distribution
 
-.PHONY: help install dev dev-daemon dev-arkd dev-web dev-temporal dev-temporal-down dev-temporal-worker dev-docker dev-stack dev-stack-down dev-stack-bootstrap claude-tfy pi-tfy web desktop \
+.PHONY: help install dev dev-daemon dev-arkd dev-web dev-temporal dev-temporal-down dev-temporal-worker dev-docker dev-control-plane dev-control-plane-down dev-control-plane-bootstrap claude-tfy pi-tfy web desktop \
         test test-file test-e2e test-e2e-fast test-e2e-web test-e2e-web-dev test-install test-watch lint lint-fix \
         format format-check \
         docs-cli \
@@ -37,7 +37,7 @@ CLAUDE_CONTINUE_FLAGS := $(if $(filter 0,$(CLAUDE_CONTINUE)),,--continue)
 help: ## Show available commands
 	@echo ""
 	@echo "  \033[1mDevelopment\033[0m"
-	@grep -E '^(install|dev|dev-daemon|dev-arkd|dev-web|dev-docker|dev-temporal|dev-temporal-down|dev-temporal-worker|dev-stack|dev-stack-down|dev-stack-bootstrap|claude-tfy|pi-tfy|web|desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(install|dev|dev-daemon|dev-arkd|dev-web|dev-docker|dev-temporal|dev-temporal-down|dev-temporal-worker|dev-control-plane|dev-control-plane-down|dev-control-plane-bootstrap|claude-tfy|pi-tfy|web|desktop):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1mTesting\033[0m"
 	@grep -E '^(test|test-file|test-e2e|test-install|test-watch|lint|format):' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -107,7 +107,7 @@ dev-temporal: ## Start local Temporal cluster (server :7233 + UI :8088) for Phas
 	# `--wait` fails when the run-once `temporal-admin` container exits 0
 	# (which it is supposed to do after registering the namespace). Run
 	# without --wait and rely on the per-service healthchecks plus the
-	# follow-up health probe in dev-stack.
+	# follow-up health probe in dev-control-plane.
 	$(DOCKER_COMPOSE) -f .infra/docker-compose.temporal.yaml -p ark-temporal up -d
 	@echo ""
 	@echo "  Temporal gRPC:   localhost:7233     (ARK_TEMPORAL_ADDRESS=localhost:7233)"
@@ -126,7 +126,7 @@ dev-temporal-down: ## Stop and remove the local Temporal cluster + its data volu
 # ship as `docker-compose`. Some laptop setups have only one of the two.
 DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
-dev-docker: ## Sub-target: Postgres :15433 + Redis :6379 containers (was: dev-stack)
+dev-docker: ## Sub-target: Postgres :15433 + Redis :6379 containers (factored out of dev-control-plane)
 	@command -v docker >/dev/null 2>&1 || { echo "Docker required. Install Docker Desktop."; exit 1; }
 	@echo "\033[1mStarting Ark dev docker (Postgres + Redis)...\033[0m"
 	$(DOCKER_COMPOSE) -f .infra/docker-compose.dev.yaml -p ark-dev up -d --wait
@@ -146,7 +146,7 @@ dev-temporal-worker: ## Sub-target: Temporal worker on host (Node + tsx; Bun lac
 	  echo "" && \
 	  exec tsx packages/core/temporal/worker.ts
 
-dev-stack: dev-docker dev-temporal ## Boot full laptop dev stack -- docker + arkd + temporal worker + ark server
+dev-control-plane: dev-docker dev-temporal ## Boot full laptop dev stack -- docker + arkd + temporal worker + ark server
 	@test -f .env.control-plane || { echo ".env.control-plane missing"; exit 1; }
 	@echo ""
 	@echo "\033[1mArk dev stack -- full laptop\033[0m"
@@ -158,8 +158,8 @@ dev-stack: dev-docker dev-temporal ## Boot full laptop dev stack -- docker + ark
 	  echo "  Postgres:          localhost:15433" && \
 	  echo "  Redis:             localhost:6379" && \
 	  echo "" && \
-	  echo "  One-time after first boot:  make dev-stack-bootstrap" && \
-	  echo "  Stop everything:            make dev-stack-down" && \
+	  echo "  One-time after first boot:  make dev-control-plane-bootstrap" && \
+	  echo "  Stop everything:            make dev-control-plane-down" && \
 	  echo ""
 	@set -a ; . ./.env.control-plane ; set +a ; \
 	  trap 'kill 0' EXIT ; \
@@ -168,7 +168,7 @@ dev-stack: dev-docker dev-temporal ## Boot full laptop dev stack -- docker + ark
 	  sleep 1 && $(BUN) packages/cli/index.ts server start --hosted --port $$ARK_WEB_PORT 2>&1 | sed 's/^/[server] /' & \
 	  wait
 
-dev-stack-down: ## Stop everything: containers + any host processes still listening
+dev-control-plane-down: ## Stop everything: containers + any host processes still listening
 	@$(DOCKER_COMPOSE) -f .infra/docker-compose.dev.yaml      -p ark-dev      down 2>&1 | sed 's/^/[ark-dev]    /' || true
 	@$(DOCKER_COMPOSE) -f .infra/docker-compose.temporal.yaml -p ark-temporal down 2>&1 | sed 's/^/[temporal]   /' || true
 	@set -a && . ./.env.control-plane && set +a && \
@@ -177,7 +177,7 @@ dev-stack-down: ## Stop everything: containers + any host processes still listen
 	    if [ -n "$$pid" ]; then echo "killing PID $$pid on :$$port"; kill $$pid 2>/dev/null || true; fi; \
 	  done
 
-dev-stack-bootstrap: ## One-time: register `compute/create local` so dispatch can run
+dev-control-plane-bootstrap: ## One-time: register `compute/create local` so dispatch can run
 	@test -f .env.control-plane || { echo ".env.control-plane missing"; exit 1; }
 	@set -a && . ./.env.control-plane && set +a && \
 	  echo "Registering compute=local against ark server on :$$ARK_WEB_PORT..." && \
@@ -255,9 +255,9 @@ test-file: ## Run a single test: make test-file F=packages/core/__tests__/foo.te
 
 test-e2e: test-web-e2e ## Run all end-to-end tests (web Playwright)
 
-# Control-plane e2e -- the test-side counterpart of `dev-stack`.
+# Control-plane e2e -- the test-side counterpart of `dev-control-plane`.
 #
-# `dev-stack` brings up the full hosted-mode stack (Postgres + Redis + Temporal
+# `dev-control-plane` brings up the full hosted-mode stack (Postgres + Redis + Temporal
 # + worker + arkd + ark server) and runs the dev processes against it; the
 # stack stays up across `Ctrl+C` so the developer can iterate.
 # `test-e2e-control-plane` mirrors that shape for the test side: bring up an
