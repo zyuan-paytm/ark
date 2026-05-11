@@ -18,8 +18,8 @@
  *   3. It does not pollute session config with test-only state.
  */
 
-import type { ActionHandler } from "./types.js";
-import { authError, validationError } from "../../temporal/errors.js";
+import type { ActionHandler } from "../types.js";
+import { authError, validationError } from "../../../temporal/errors.js";
 
 export interface FlakyPrConfig {
   failTimes: number;

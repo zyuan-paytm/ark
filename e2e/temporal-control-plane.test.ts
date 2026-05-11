@@ -57,6 +57,7 @@ beforeAll(async () => {
       // reach it via host.docker.internal:19102 to deliver stub-agent
       // completion reports. Default is loopback-only.
       ARK_CONDUCTOR_HOSTNAME: "0.0.0.0",
+      ARK_ENABLE_TEST_ACTIONS: "1",
     },
   });
   rpc = new RpcClient(server.webUrl);
@@ -264,6 +265,7 @@ describe("T3 -- manual gate across server restart", () => {
           ARK_TEMPORAL_ORCHESTRATION: "true",
           ARK_TEMPORAL_SERVER_URL: "localhost:7234",
           ARK_TEMPORAL_NAMESPACE: "default",
+          ARK_ENABLE_TEST_ACTIONS: "1",
         },
       });
       rpc = new RpcClient(server.webUrl);

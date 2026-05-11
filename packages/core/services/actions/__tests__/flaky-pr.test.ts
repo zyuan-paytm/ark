@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { runFlakyPr } from "../flaky-pr.js";
+import { runFlakyPr } from "./flaky-pr-fixture.js";
 
 test("flaky-pr fails N times then succeeds", async () => {
   const handle = runFlakyPr({ failTimes: 3, error: "503 service unavailable" });
