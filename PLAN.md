@@ -1,82 +1,134 @@
-# PLAN: One-line note in docs/architecture.md
+# PLAN: unit test for `parse_datetime` raising `HTTPException(400)` on bad ISO 8601
 
 ## 1. Summary
 
-The task name is truncated (`add-a-one-line-note-to-docs-architecture-md-mentioning-that-` --
-the predicate after "that" is missing). The most plausible referent, given the recent five
-`refactor(arkd): ...` commits on this branch finishing the arkd `client/` / `server/` /
-`common/` separation, is the new arkd package layout: Section 4.1 of `docs/architecture.md`
-still calls arkd a "Single binary (`packages/arkd/server.ts`, ~800 lines)" -- stale after
-commits `c3b89eb9`, `f0311621`, `63889c7a`. This plan adds one sentence to that section to
-record the split. No code, no tests.
+The task asks for one unit test against
+`app/control_plane/routers/request_audit/deps.py:42-52`, function `parse_datetime`,
+verifying it raises `HTTPException(400)` for malformed ISO 8601 input.
+**That file does not exist in this repository.** This repo is the Ark
+Bun + TypeScript monorepo (`packages/{cli,core,arkd,...}`); it contains zero
+Python files, no `app/` directory, no FastAPI usage, and no `parse_datetime`
+or `request_audit` symbols. The task appears to have been routed to the wrong
+repo or branch. Implementation is **blocked** until either (a) the missing
+Python source is provided, or (b) the task is re-scoped to an equivalent
+TypeScript symbol in this repo.
 
 ## 2. Files to modify/create
 
-- `docs/architecture.md` -- add one sentence to Section 4.1 noting that arkd is organized as
-  `client/`, `server/`, `common/` sub-packages with an ESLint boundary rule, and bump the
-  `Last updated:` line at top.
-- `PLAN.md` -- this planning artifact (committed on this branch by the planner).
+Nothing actionable in this repo today. If the missing source becomes available,
+the conventional layout would be:
 
-No new files, no code, no schema, no tests.
+- `app/control_plane/routers/request_audit/deps.py` -- **must already exist
+  before any test is written**; the test targets lines 42-52 of this file.
+- `tests/control_plane/routers/request_audit/test_deps.py` -- new file, one
+  pytest function (`test_parse_datetime_bad_iso_raises_400`). Mirror whatever
+  directory convention the surrounding tests use (`tests/` vs `app/tests/` vs
+  per-module `_tests_` -- decide by reading the source repo, not guessing).
+- `PLAN.md` -- this planning artifact (committed on this branch).
+
+No production code change. No schema, no migrations, no fixtures expected.
 
 ## 3. Implementation steps
 
-These are independent and can each be verified standalone.
+The steps below are **conditional on the source file existing**. Until it does,
+stop after step 0.
 
-1. **Edit Section 4.1** of `docs/architecture.md` (lines 459-461):
-   - Replace the "Single binary (`packages/arkd/server.ts`, ~800 lines)" wording with prose
-     that reflects the current layout: server entry under `packages/arkd/server/`, typed
-     `client/` for callers, shared `common/`, and an ESLint `no-restricted-imports` boundary
-     preventing `client/` <-> `server/` cross-imports.
-   - Keep the addition to one sentence; do not balloon the section. The task explicitly says
-     "one-line note".
-2. **Bump the `Last updated:` line** at `docs/architecture.md` line 4 to `2026-05-06`.
-3. **Run `make format`** to apply Prettier to the Markdown file.
-4. **Sanity-grep** for the now-stale phrase elsewhere in `docs/`:
-   `grep -rn "arkd/server.ts" docs/` and `grep -rn "single binary" docs/`. If hits exist
-   outside Section 4.1, **do not fix them in this task** (scope creep -- task is a one-line
-   note). Note them in the commit body as a follow-up.
-5. **Stage and commit**:
-   `git add docs/architecture.md PLAN.md` then
-   `git commit -m "docs(architecture): note arkd client/server/common split"`.
-6. **Verify** with `git log --oneline -1` that the commit landed and `git show --stat HEAD`
-   that only the two expected files changed.
+0. **Verify the target exists.** Run from repo root:
+   ```bash
+   test -f app/control_plane/routers/request_audit/deps.py \
+     && sed -n '42,52p' app/control_plane/routers/request_audit/deps.py
+   ```
+   If the file is absent (current state in this worktree), abort and surface
+   the mismatch -- do not invent a `parse_datetime` to test.
+
+1. **Read `parse_datetime` (lines 42-52)** to confirm:
+   - It takes a single string argument (probable signature
+     `parse_datetime(value: str) -> datetime`).
+   - The 400 branch is raised on `ValueError` / `fromisoformat` failure (this
+     is the standard FastAPI dep-injection pattern -- the function is meant to
+     be used as `Depends(parse_datetime)` and translates bad query/path input
+     into a clean 400).
+   - The exception carries a `detail` string so the test can assert on it.
+
+2. **Identify the test framework.** Look for `pytest.ini`, `pyproject.toml`
+   `[tool.pytest.ini_options]`, or `setup.cfg`. Match the repo's existing
+   import style (`from app.control_plane.routers.request_audit.deps import
+   parse_datetime` vs. a shorter alias from `conftest.py`).
+
+3. **Write one test** (single function, no class wrapper unless surrounding
+   tests use classes). Skeleton:
+   ```python
+   import pytest
+   from fastapi import HTTPException
+
+   from app.control_plane.routers.request_audit.deps import parse_datetime
+
+
+   def test_parse_datetime_raises_400_on_bad_iso8601():
+       with pytest.raises(HTTPException) as exc:
+           parse_datetime("not-a-real-datetime")
+       assert exc.value.status_code == 400
+   ```
+   Use a clearly-malformed string (`"not-a-real-datetime"` or
+   `"2024-13-45T99:99:99Z"`) so the failure mode is unambiguous and not a
+   timezone edge case. Do **not** parametrize over many inputs -- the task
+   says "one unit test".
+
+4. **Run the test** (`pytest path/to/test_deps.py -q`) and confirm green.
+
+5. **Commit** with the project's convention (likely
+   `test: add parse_datetime 400 on bad ISO 8601`). Do **not** bundle unrelated
+   files into this commit -- the diff should be one new test file.
 
 ## 4. Testing strategy
 
-- No code changed -> no unit tests to write or run.
-- `make format` must succeed (Prettier covers Markdown). Run it before committing.
-- `make lint` is unaffected by Markdown but is cheap; a quick run is reasonable belt-and-
-  braces and matches the pre-commit checklist in CLAUDE.md.
-- Manual: `git diff HEAD~1 -- docs/architecture.md` should show one sentence changed in
-  Section 4.1 plus the `Last updated:` bump -- nothing else. A reviewer should be able to
-  read the diff in under 10 seconds.
+- **Positive coverage:** the single failing-input case described above.
+- **Assertion granularity:**
+  - Required: `exc.value.status_code == 400`.
+  - Optional, only if `deps.py` sets a stable `detail` literal: assert
+    `"datetime" in exc.value.detail.lower()` (or whatever literal the code
+    uses). Skip this if the message is templated / variable -- brittle
+    assertions on free-form error text are worse than no assertion.
+- **What we explicitly are NOT testing in this task:**
+  - The happy path (valid ISO 8601 -> returns `datetime`). Out of scope; add
+    in a follow-up if missing.
+  - Timezone-aware vs naive handling. Out of scope.
+  - Behavior under FastAPI's `Depends()` (integration territory).
+- **Verification:** `pytest -q` plus `pytest --collect-only` to confirm the
+  new test is picked up by the existing test discovery config.
 
 ## 5. Risk assessment
 
-- **Blast radius:** zero. Documentation only -- no runtime, build, schema, or test surface
-  is touched.
-- **Misinterpretation of the truncated task:** the missing predicate after "mentioning that"
-  could plausibly point elsewhere. Other recent-commit candidates:
-  - the test split between unit and compute-e2e (`9e58a6a8`)
-  - the autonomous-flow port hardcoding fix (`9e58a6a8`)
-  - dropping the flaky attach-sweep test (`96400e59`)
-  None of these match `docs/architecture.md` as a target as cleanly as the arkd refactor
-  does, since architecture.md Section 4.1 is the only place where text is now factually
-  stale because of recent commits. Still, if the implementer or reviewer reads the truncated
-  task differently, the edit may need to be redirected -- see Open Questions.
-- **Breaking changes / migrations:** none.
+- **Primary risk: the file does not exist in this repo.** This is not a small
+  ambiguity -- it is a hard blocker. The Ark repo is TypeScript; planning a
+  Python test here will produce code that cannot be committed or run.
+  Implementer must NOT fabricate a `parse_datetime` in this repo to satisfy
+  the task. If routed to the right repo, the risk drops to near zero.
+- **Edge cases for the test itself (once the file exists):**
+  - `parse_datetime` might return `None` instead of raising for empty string
+    -- pick an input that is guaranteed to hit the `ValueError` branch on
+    `datetime.fromisoformat`, e.g. `"not-a-real-datetime"`.
+  - `HTTPException` could be re-exported via a project wrapper. Import from
+    the same module the production code uses, not from `fastapi` directly, if
+    that's the local convention.
+- **Breaking changes / migrations:** none. Pure test addition.
 
 ## 6. Open questions
 
-- **What does the truncated task title actually say?** The task name ends with `mentioning
-  that-` and is cut off. Two answers resolve the ambiguity:
-  1. Read the originating issue / message that produced this task name (the planner does not
-     have access to it).
-  2. Ask the user for the missing predicate.
-  If neither is available before implementation, the implementer should proceed with the
-  arkd-split interpretation (highest-signal match against recent commits) and call out the
-  ambiguity in the commit body so a reviewer can redirect cheaply.
-- **If the answer is something other than the arkd split** (e.g. the test-suite split,
-  Temporal phasing, or some unrelated subject), this plan does not apply. Abort and re-plan
-  rather than shoe-horning the wrong note into Section 4.1.
+1. **Which repo is the real target?** This worktree is Ark
+   (`/Users/zineng/.ark/worktrees/s-xrqnks8z5k`, branch `ark-s-xrqnks8z5k`),
+   which has no Python code. Likely candidates for the actual target:
+   - A separate FastAPI control-plane repo (the path
+     `app/control_plane/routers/...` matches a typical FastAPI service
+     layout).
+   - A sibling project under `~/.ark/` or a different worktree.
+   The user must confirm the repo before implementation can proceed.
+2. **What does `parse_datetime` actually do on bad input today?** Without the
+   source file we are guessing it `raise HTTPException(status_code=400, ...)`.
+   If it instead returns `None`, or raises `ValueError` and relies on FastAPI
+   to translate, the test shape changes. Confirm by reading lines 42-52 first.
+3. **Test directory convention.** `tests/` mirroring the package vs. inline
+   `_tests_` next to source -- inspect the real repo before placing the file.
+4. **Should we also cover the happy path?** Task says "one unit test", so
+   strictly no -- but it's worth flagging as a follow-up since a single
+   failure-path test gives weaker regression protection than a pair.
