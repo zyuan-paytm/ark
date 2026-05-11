@@ -268,17 +268,30 @@ test-file: ## Run a single test: make test-file F=packages/core/__tests__/foo.te
 test-e2e: test-web-e2e ## Run all end-to-end tests (web Playwright)
 
 # Control-plane e2e: real `ark server start --hosted` against an isolated
-# Docker compose stack (Postgres :15434 + Redis :6380). Distinct from the
-# dev stack so this can run alongside `make dev-stack`.
+# Docker compose stack (Postgres :15434 + Redis :6380 + Temporal :7234 +
+# temporal-worker container). Distinct from the dev stack so this can run
+# alongside `make dev-stack`.
 #
-# CI must have docker + (for Phase 2) tmux on PATH. The test boots the
-# stack, spawns the real server binary, and exercises the dispatch chain
-# via /api/rpc -- never imports AppContext directly.
-test-e2e-control-plane: ## Run control-plane e2e against isolated Postgres+Redis
+# Single entry point for every docker-stack e2e test file in `e2e/`. Boots
+# the compose stack once, runs the bespoke control-plane test, then runs
+# the Temporal T1-T5 suite against the same stack via ARK_E2E_STACK_RUNNING=1
+# (avoids a second cold-start of Postgres + Temporal). Tears the stack down
+# even if any sub-test fails.
+#
+# CI must have docker + tmux on PATH. The test boots the stack, spawns the
+# real server binary, and exercises the dispatch chain via /api/rpc -- never
+# imports AppContext directly.
+test-e2e-control-plane: ## Run all docker-stack e2e tests (bespoke + Temporal T1-T5)
 	@command -v docker >/dev/null 2>&1 || { echo "Docker required for control-plane e2e."; exit 1; }
 	@command -v tmux >/dev/null 2>&1 || { echo "tmux required for control-plane e2e (brew install tmux / apt-get install tmux)."; exit 1; }
-	@echo "\033[1mRunning control-plane e2e (Postgres :15434 + Redis :6380)...\033[0m"
-	$(BUN) test e2e/control-plane.test.ts
+	@echo "\033[1mBringing up e2e Docker stack (Postgres :15434 + Redis :6380 + Temporal :7234)...\033[0m"
+	@$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e up -d --wait
+	@echo "\033[1mRunning bespoke control-plane e2e...\033[0m"
+	@set -e; \
+	  trap '$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e down -v' EXIT; \
+	  ARK_E2E_STACK_RUNNING=1 $(BUN) test e2e/control-plane.test.ts; \
+	  echo "\033[1mRunning Temporal T1-T5 e2e...\033[0m"; \
+	  ARK_E2E_STACK_RUNNING=1 $(BUN) test e2e/temporal-control-plane.test.ts
 
 test-e2e-control-plane-up: ## Bring up the e2e Docker stack only (debug aid)
 	$(DOCKER_COMPOSE) -f .infra/docker-compose.e2e.yaml -p ark-e2e up -d --wait
